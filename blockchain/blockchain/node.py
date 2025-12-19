@@ -87,8 +87,12 @@ class Node:
         )
         logger.info("Gulf Stream processor initialized with TPU integration")
         
-        # Initialize slot-based block production
-        self.slot_producer = SlotBasedBlockProducer(self)
+        # Initialize slot-based block production using the leader schedule's slot duration
+        # so leadership windows are not missed.
+        self.slot_producer = SlotBasedBlockProducer(
+            self,
+            slot_duration_seconds=self.blockchain.leader_schedule.slot_duration_seconds,
+        )
         # Start Solana-style slot-based block production automatically
         try:
             self.start_slot_production()

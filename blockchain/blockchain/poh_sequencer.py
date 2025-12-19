@@ -26,9 +26,9 @@ class PoHSequencer:
         self.tick_interval = 0.5  # seconds between ticks (can be tuned)
         self.last_tick = time.time()
 
-    def tick(self):
+    def tick(self, force: bool = False):
         now = time.time()
-        if now - self.last_tick >= self.tick_interval:
+        if force or (now - self.last_tick >= self.tick_interval):
             self.current_hash = hashlib.sha256(self.current_hash.encode()).hexdigest()
             self.entries.append(PoHEntry(self.current_hash, transaction=None, timestamp=now))
             self.last_tick = now

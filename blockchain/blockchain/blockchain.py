@@ -687,7 +687,7 @@ class Blockchain:
         logger.info(f"STEP 1: PoH sequencing for {len(covered_transactions)} transactions")
         for transaction in covered_transactions:
             # Add periodic ticks to maintain continuous PoH stream
-            self.poh_sequencer.tick()
+            self.poh_sequencer.tick(force=True)
             
             # Ingest transaction into PoH stream
             self.poh_sequencer.ingest_transaction(transaction)
@@ -695,7 +695,7 @@ class Blockchain:
         
         # Add final ticks to complete the slot
         for _ in range(3):
-            self.poh_sequencer.tick()
+            self.poh_sequencer.tick(force=True)
         
         # Get the complete PoH sequence
         poh_sequence = self.poh_sequencer.get_sequence()
