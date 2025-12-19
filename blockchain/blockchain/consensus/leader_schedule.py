@@ -85,22 +85,24 @@ class LeaderSchedule:
             "leader_pool": [node[:20] + "..." for node in leader_pool[:3]]
         })
         
-        # Generate schedule for each slot in the epoch
+        # Generate schedule for each slot in the epoch.
+        # IMPORTANT: keep this deterministic and lightweight.
+        # Running a full quantum-probing consensus per slot is both extremely
+        # expensive (1333 slots/epoch) and can fail if the probe protocol
+        # returns structured objects.
+        rr_offset = 0
+        try:
+            # Optional: use consensus once per epoch to pick a starting offset.
+            candidate = quantum_consensus.select_representative_node(epoch_seed)
+            if candidate and candidate in leader_pool:
+                rr_offset = leader_pool.index(candidate)
+        except Exception:
+            rr_offset = 0
+
         for slot in range(self.slots_per_epoch):
-            # Create unique seed for each slot
-            slot_seed = hashlib.sha256(f"{epoch_seed}_{slot}".encode()).hexdigest()
-            
-            # CRITICAL FIX: Try quantum selection first, then fallback to viable leaders
-            selected_leader = quantum_consensus.select_representative_node(slot_seed)
-            
-            if selected_leader and selected_leader in leader_pool:
-                # Use quantum-selected leader if viable
-                schedule[slot] = selected_leader
-            elif leader_pool:
-                # Fallback to round-robin from viable leaders
-                schedule[slot] = leader_pool[slot % len(leader_pool)]
+            if leader_pool:
+                schedule[slot] = leader_pool[(slot + rr_offset) % len(leader_pool)]
             else:
-                # Final fallback to any registered node
                 schedule[slot] = registered_nodes[slot % len(registered_nodes)]
         
         logger.info({
