@@ -8,8 +8,8 @@
 NUM_NODES=${1:-10}
 
 # Validate input
-if ! [[ "$NUM_NODES" =~ ^[0-9]+$ ]] || [ "$NUM_NODES" -lt 1 ] || [ "$NUM_NODES" -gt 100 ]; then
-    echo "❌ Error: Please provide a valid number of nodes (1-100)"
+if ! [[ "$NUM_NODES" =~ ^[0-9]+$ ]] || [ "$NUM_NODES" -lt 1 ] || [ "$NUM_NODES" -gt 1000 ]; then
+    echo "❌ Error: Please provide a valid number of nodes (1-1000)"
     echo "Usage: $0 [NUMBER_OF_NODES]"
     echo "Example: $0 5    # Generate keys for 5 nodes"
     echo "Example: $0      # Generate keys for 10 nodes (default)"

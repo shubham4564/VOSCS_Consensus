@@ -11,8 +11,8 @@
 NUM_NODES=${1:-10}
 
 # Validate input
-if ! [[ "$NUM_NODES" =~ ^[0-9]+$ ]] || [ "$NUM_NODES" -lt 1 ] || [ "$NUM_NODES" -gt 100 ]; then
-    echo "❌ Error: Please provide a valid number of nodes (1-100)"
+if ! [[ "$NUM_NODES" =~ ^[0-9]+$ ]] || [ "$NUM_NODES" -lt 1 ] || [ "$NUM_NODES" -gt 1000 ]; then
+    echo "❌ Error: Please provide a valid number of nodes (1-1000)"
     echo "Usage: $0 [NUMBER_OF_NODES]"
     echo "Example: $0 5    # Start 5 nodes"
     echo "Example: $0      # Start 10 nodes (default)"
@@ -48,7 +48,7 @@ start_node() {
     echo "Starting Node $node_num - Port: $node_port, API: $api_port, Key: $key_file"
     
     python run_node.py \
-        --ip localhost \
+        --ip 0.0.0.0 \
         --node_port $node_port \
         --api_port $api_port \
         --key_file $key_file \
@@ -128,8 +128,8 @@ echo "   ⚡ Active TPUs: $active_tpus/$NUM_NODES"
 echo "   📡 Overall Health: $active_nodes/$NUM_NODES nodes responding"
 
 if command -v bc >/dev/null 2>&1; then
-    health_pct=$(echo "scale=1; $active_nodes * 100 / $NUM_NODES" | bc -l 2>/dev/null || echo "0")
-    tpu_health_pct=$(echo "scale=1; $active_tpus * 100 / $NUM_NODES" | bc -l 2>/dev/null || echo "0")
+    health_pct=$(echo "scale=1; $active_nodes * 1000 / $NUM_NODES" | bc -l 2>/dev/null || echo "0")
+    tpu_health_pct=$(echo "scale=1; $active_tpus * 1000 / $NUM_NODES" | bc -l 2>/dev/null || echo "0")
     echo "   📈 API Health: ${health_pct}%"
     echo "   ⚡ TPU Health: ${tpu_health_pct}%"
 else
