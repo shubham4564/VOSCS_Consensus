@@ -46,16 +46,9 @@ class Node:
         # This ensures ALL nodes use the same genesis block from keys/genesis_private_key.pem
         self.blockchain = Blockchain()
         
-        # ENHANCED: Register this node with quantum consensus immediately at startup
-        if self.blockchain.quantum_consensus:
-            try:
-                self.blockchain.quantum_consensus.register_node(
-                    self.wallet.public_key_string(), 
-                    self.wallet.public_key_string()
-                )
-                logger.info(f"Node registered with quantum consensus: {self.wallet.public_key_string()[:20]}...")
-            except Exception as e:
-                logger.warning(f"Failed to register node with quantum consensus: {e}")
+        # IMPORTANT: Quantum consensus validator registration must be deterministic and
+        # identical across nodes. The blockchain layer initializes a shared validator set
+        # from genesis/local config; avoid adding node-local entries here.
         
         # Initialize gossip node with this node's specific ports (after blockchain creation)
         if self.blockchain.gossip_node:

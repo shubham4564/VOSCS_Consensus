@@ -21,6 +21,17 @@ fi
 
 echo "Starting $NUM_NODES blockchain nodes..."
 
+# Write a shared cluster start time so all nodes compute identical slot/epoch boundaries.
+python3 - <<'PY'
+import json, os, time
+os.makedirs('genesis_config', exist_ok=True)
+path = os.path.join('genesis_config', 'cluster_start_time.json')
+payload = {'epoch_start_time': time.time()}
+with open(path, 'w', encoding='utf-8') as f:
+    json.dump(payload, f)
+print(f"🕒 Wrote shared epoch_start_time to {path}: {payload['epoch_start_time']}")
+PY
+
 # Kill any existing python processes for clean start
 pkill -f "run_node.py" 2>/dev/null || true
 sleep 2
@@ -76,6 +87,9 @@ echo "📝 Logs: logs/node1.log - logs/node${NUM_NODES}.log"
 echo ""
 echo "⏳ Wait 10 seconds for nodes to initialize and connect..."
 sleep 10
+
+echo "🔗 Bootstrapping P2P + gossip peer connections..."
+python3 tools/bootstrap_network.py || true
 
 echo "🔍 Checking node status..."
 active_nodes=0

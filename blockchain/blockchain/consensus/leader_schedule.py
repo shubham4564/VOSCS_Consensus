@@ -234,7 +234,7 @@ class LeaderSchedule:
             "current_schedule_size": len(self.current_schedule)
         })
     
-    def update_schedule(self, quantum_consensus):
+    def update_schedule(self, quantum_consensus, seed_hash: Optional[str] = None):
         """
         Update the leader schedule, handling epoch transitions.
         Should be called periodically by the blockchain.
@@ -243,17 +243,23 @@ class LeaderSchedule:
         if self.is_epoch_transition_needed():
             self.transition_to_next_epoch()
         
+        # Use a deterministic seed across nodes. The blockchain layer should pass a
+        # shared seed derived from chain state (e.g., tip hash / genesis hash).
+        # Fall back to a deterministic value if none is provided.
+        base_seed = seed_hash or hashlib.sha256(
+            f"epoch_seed_{self.current_epoch}_{self.epoch_start_time}".encode()
+        ).hexdigest()
+
         # Generate next epoch schedule if we don't have it
         if not self.next_schedule:
             next_epoch = self.current_epoch + 1
-            # Use current blockchain state as seed for next epoch
-            seed_hash = hashlib.sha256(f"epoch_{next_epoch}_{time.time()}".encode()).hexdigest()
-            self.next_schedule = self.generate_epoch_schedule(next_epoch, quantum_consensus, seed_hash)
+            next_seed = hashlib.sha256(f"{base_seed}_next_{next_epoch}".encode()).hexdigest()
+            self.next_schedule = self.generate_epoch_schedule(next_epoch, quantum_consensus, next_seed)
         
         # Generate current epoch schedule if we don't have it (initialization)
         if not self.current_schedule:
-            seed_hash = hashlib.sha256(f"epoch_{self.current_epoch}_{self.epoch_start_time}".encode()).hexdigest()
-            self.current_schedule = self.generate_epoch_schedule(self.current_epoch, quantum_consensus, seed_hash)
+            current_seed = hashlib.sha256(f"{base_seed}_current_{self.current_epoch}".encode()).hexdigest()
+            self.current_schedule = self.generate_epoch_schedule(self.current_epoch, quantum_consensus, current_seed)
     
     def get_schedule_info(self) -> Dict:
         """Get detailed information about current schedule state"""

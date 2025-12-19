@@ -8,10 +8,55 @@ It detects running nodes and creates bootstrap connections between them.
 """
 
 import requests
-import json
 import time
-import sys
 from typing import List, Dict
+
+
+def _load_node_public_key(node_id: int) -> str:
+    """Load the node's public key deterministically from local key files.
+
+    This workspace runs all validators on one machine, so all private key PEMs
+    are available locally. Using key files avoids relying on API endpoints that
+    may not expose the full public key.
+    """
+    from blockchain.transaction.wallet import Wallet
+
+    if node_id == 1:
+        key_file = "keys/genesis_private_key.pem"
+    else:
+        key_file = f"keys/node{node_id}_private_key.pem"
+        if not os.path.isfile(key_file):
+            # Mirror start_nodes.sh fallback behavior
+            if os.path.isfile("keys/staker_private_key.pem"):
+                key_file = "keys/staker_private_key.pem"
+            else:
+                key_file = "keys/genesis_private_key.pem"
+
+    wallet = Wallet()
+    wallet.from_key(key_file)
+    return wallet.public_key_string()
+
+
+def _ensure_repo_root_on_path() -> None:
+    import os
+    import sys
+
+    current = os.path.abspath(os.path.dirname(__file__))
+    for _ in range(6):
+        if os.path.isfile(os.path.join(current, "blockchain", "__init__.py")):
+            if current not in sys.path:
+                sys.path.insert(0, current)
+            return
+        parent = os.path.dirname(current)
+        if parent == current:
+            return
+        current = parent
+
+
+_ensure_repo_root_on_path()
+del _ensure_repo_root_on_path
+
+import os
 
 def get_running_nodes() -> List[Dict]:
     """Detect running nodes by checking API endpoints"""
@@ -21,16 +66,14 @@ def get_running_nodes() -> List[Dict]:
     for i in range(20):
         port = 11000 + i
         try:
-            response = requests.get(f"http://localhost:{port}/api/v1/node/status", timeout=2)
+            response = requests.get(f"http://localhost:{port}/api/v1/blockchain/node-stats/", timeout=2)
             if response.status_code == 200:
-                node_data = response.json()
                 running_nodes.append({
                     'api_port': port,
                     'p2p_port': 10000 + i,
                     'gossip_port': 12000 + i,
                     'tpu_port': 13000 + i,
                     'tvu_port': 14000 + i,
-                    'public_key': node_data.get('public_key', ''),
                     'node_id': i + 1
                 })
                 print(f"✅ Found Node {i+1} on API port {port}")
@@ -54,7 +97,7 @@ def bootstrap_gossip_connections(nodes: List[Dict]):
             try:
                 # Add peer via the blockchain's add_gossip_peer method
                 payload = {
-                    'peer_public_key': peer['public_key'],
+                    'peer_public_key': _load_node_public_key(peer['node_id']),
                     'ip_address': 'localhost',
                     'gossip_port': peer['gossip_port'],
                     'tpu_port': peer['tpu_port'],
@@ -62,7 +105,7 @@ def bootstrap_gossip_connections(nodes: List[Dict]):
                 }
                 
                 response = requests.post(
-                    f"http://localhost:{node['api_port']}/api/v1/gossip/add_peer",
+                    f"http://localhost:{node['api_port']}/api/v1/blockchain/gossip/add_peer/",
                     json=payload,
                     timeout=5
                 )
@@ -82,43 +125,13 @@ def bootstrap_gossip_connections(nodes: List[Dict]):
     return connections_made
 
 def bootstrap_p2p_connections(nodes: List[Dict]):
-    """Bootstrap P2P connections between nodes"""
-    print(f"\n🔗 Bootstrapping P2P connections for {len(nodes)} nodes...")
-    
-    connections_made = 0
-    
-    for i, node in enumerate(nodes):
-        # Connect each node to several other nodes
-        other_nodes = [n for j, n in enumerate(nodes) if j != i]
-        target_peers = other_nodes[:min(5, len(other_nodes))]
-        
-        for peer in target_peers:
-            try:
-                # Use the P2P connect endpoint if available
-                payload = {
-                    'ip': 'localhost',
-                    'port': peer['p2p_port']
-                }
-                
-                response = requests.post(
-                    f"http://localhost:{node['api_port']}/api/v1/p2p/connect",
-                    json=payload,
-                    timeout=5
-                )
-                
-                if response.status_code == 200:
-                    print(f"  ✅ Node {node['node_id']} → Node {peer['node_id']} P2P connection")
-                    connections_made += 1
-                else:
-                    print(f"  ❌ Node {node['node_id']} → Node {peer['node_id']} failed: {response.status_code}")
-                    
-            except Exception as e:
-                print(f"  ❌ Node {node['node_id']} → Node {peer['node_id']} error: {e}")
-        
-        # Small delay to prevent overwhelming the nodes
-        time.sleep(0.3)
-    
-    return connections_made
+    """Bootstrap P2P connections between nodes.
+
+    This codebase currently doesn't expose a stable HTTP API for initiating
+    P2P socket connections, so we rely on gossip peer bootstrapping.
+    """
+    print(f"\nℹ️  Skipping explicit P2P bootstrapping (no HTTP endpoint)")
+    return 0
 
 def check_network_status(nodes: List[Dict]):
     """Check the network status after bootstrapping"""
@@ -129,11 +142,11 @@ def check_network_status(nodes: List[Dict]):
     
     for node in nodes:
         try:
-            response = requests.get(f"http://localhost:{node['api_port']}/api/v1/node/status", timeout=3)
+            response = requests.get(f"http://localhost:{node['api_port']}/api/v1/blockchain/gossip/status/", timeout=3)
             if response.status_code == 200:
                 status = response.json()
-                gossip_peers = status.get('gossip_protocol', {}).get('active_peers', 0)
-                p2p_peers = status.get('connected_peers', 0)
+                gossip_peers = status.get('active_peers', 0)
+                p2p_peers = 0
                 
                 total_gossip_peers += gossip_peers
                 total_p2p_peers += p2p_peers

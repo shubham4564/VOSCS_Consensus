@@ -1,4 +1,7 @@
 import logging
+import json
+import os
+import glob
 import time
 import threading
 from typing import Dict, Optional, List
@@ -89,6 +92,23 @@ class Blockchain:
                     "total_accounts": len(genesis_data["accounts"]),
                     "genesis_file": genesis_file
                 })
+
+                # If present, apply a shared cluster start time so all nodes compute
+                # the same slot/epoch boundaries.
+                try:
+                    cluster_start_path = os.path.join("genesis_config", "cluster_start_time.json")
+                    with open(cluster_start_path, "r", encoding="utf-8") as f:
+                        cluster_start = json.load(f)
+                    epoch_start_time = float(cluster_start.get("epoch_start_time"))
+                    self.leader_schedule.epoch_start_time = epoch_start_time
+                    logger.info({
+                        "message": "Applied shared cluster epoch_start_time",
+                        "epoch_start_time": epoch_start_time,
+                        "cluster_start_path": cluster_start_path,
+                    })
+                except Exception:
+                    # Optional; default to local wallclock start.
+                    pass
                 
             except FileNotFoundError:
                 logger.warning(f"Genesis configuration not found: {genesis_file}")
@@ -135,26 +155,46 @@ class Blockchain:
             # CRITICAL FIX: Initialize quantum consensus with genesis configuration
             if not self._quantum_consensus_initialized and 'genesis_data' in locals():
                 try:
-                    # Register bootstrap validator in quantum consensus
-                    bootstrap_validator = genesis_data["bootstrap_validator"]
-                    self.quantum_consensus.register_node(bootstrap_validator, bootstrap_validator)
-                    
-                    # Register faucet for leader selection
-                    faucet_key = genesis_data["faucet"]
-                    self.quantum_consensus.register_node(faucet_key, faucet_key)
-                    
-                    # Register vote account
-                    vote_key = genesis_data["bootstrap_vote"]
-                    self.quantum_consensus.register_node(vote_key, vote_key)
+                    # Register a deterministic validator set for this dev cluster.
+                    # We derive validator public keys from local private key PEMs so
+                    # every node (on the same machine) registers the same set.
+                    validator_key_files = []
+                    validator_key_files.extend(sorted(glob.glob(os.path.join("keys", "genesis_private_key.pem"))))
+                    validator_key_files.extend(sorted(glob.glob(os.path.join("keys", "node*_private_key.pem"))))
+                    # Optional fallback key used by start_nodes.sh when nodeN key is missing.
+                    validator_key_files.extend(sorted(glob.glob(os.path.join("keys", "staker_private_key.pem"))))
+
+                    validator_pubkeys: List[str] = []
+                    for key_path in validator_key_files:
+                        try:
+                            w = Wallet()
+                            w.from_key(key_path)
+                            validator_pubkeys.append(w.public_key_string())
+                        except Exception as e:
+                            logger.warning({
+                                "message": "Failed to load validator key file",
+                                "key_path": key_path,
+                                "error": str(e),
+                            })
+
+                    # Always include bootstrap validator from genesis (even if key file missing)
+                    bootstrap_validator = genesis_data.get("bootstrap_validator")
+                    if bootstrap_validator:
+                        validator_pubkeys.append(bootstrap_validator)
+
+                    # Deduplicate deterministically
+                    validator_pubkeys = sorted(set(validator_pubkeys))
+
+                    for pubkey in validator_pubkeys:
+                        self.quantum_consensus.register_node(pubkey, pubkey)
                     
                     self._quantum_consensus_initialized = True
                     
                     logger.info({
                         "message": "Quantum consensus initialized with genesis validators",
-                        "bootstrap_validator": bootstrap_validator[:20] + "...",
-                        "faucet": faucet_key[:20] + "...",
-                        "vote_account": vote_key[:20] + "...",
-                        "total_validators": len(self.quantum_consensus.nodes)
+                        "bootstrap_validator": bootstrap_validator[:20] + "..." if bootstrap_validator else None,
+                        "total_validators": len(self.quantum_consensus.nodes),
+                        "validator_key_files": len(validator_key_files),
                     })
                     
                     # Start leader selection process
@@ -539,7 +579,13 @@ class Blockchain:
         Should be called regularly to maintain the 2-minute advance schedule.
         """
         if self.quantum_consensus:
-            self.leader_schedule.update_schedule(self.quantum_consensus)
+            # Deterministic seed based on shared chain state (tip hash).
+            try:
+                tip_hash = BlockchainUtils.hash(self.blocks[-1].payload()).hex() if self.blocks else ""
+            except Exception:
+                tip_hash = ""
+
+            self.leader_schedule.update_schedule(self.quantum_consensus, seed_hash=tip_hash)
             
             # Automatically publish updated leader schedule to gossip network
             if self.gossip_node:
