@@ -74,8 +74,8 @@ pip install -r requirements/requirements.txt
 ### **3. Generate Cryptographic Keys**
 ```bash
 # Generate keys for nodes (genesis + node keys)
-chmod +x generate_keys.sh
-./generate_keys.sh
+chmod +x scripts/generate_keys.sh
+./scripts/generate_keys.sh
 
 # Verify key generation
 ls keys/
@@ -94,7 +94,7 @@ ls keys/
 # ✅ All 5 nodes started!
 # 📡 Node ports: 10000-10004
 # 🌐 API ports: 11000-11004
-# 📝 Enhanced Logs: Use 'python monitor_logs.py summary' to view all logs
+# 📝 Logs: tail -f logs/node1.log
 
 # NEW: Leader selection now starts automatically!
 # ⭐ Leaders are selected within 2-3 seconds of network startup
@@ -123,22 +123,22 @@ curl http://localhost:11000/api/v1/blockchain/leader/current/ | jq
 }
 
 # Use monitoring tools for continuous tracking
-python leader_monitor.py --once
+python tools/leader_monitor.py --once
 ```
 
 ### **3. Run Transaction Test**
 ```bash
 # NEW: Interactive transaction example (recommended for beginners)
-python simple_transaction_example.py
+python clients/simple_transaction_example.py
 
 # Simple transaction flow test
-python test_sample_transaction.py
+python clients/test_sample_transaction.py
 
 # Comprehensive Solana-style flow test
-python test_solana_flow.py
+python tests/test_solana_validation.py
 
 # Performance analysis test
-python test_comprehensive_performance.py
+python tests/test_performance_metrics.py
 ```
 
 ## 💰 **Sending Transactions & Testing**
@@ -171,10 +171,10 @@ The blockchain supports several transaction types:
 **Simple Transaction Test:**
 ```bash
 # NEW: Interactive transaction example with detailed output
-python simple_transaction_example.py
+python clients/simple_transaction_example.py
 
 # Basic transaction flow test
-python test_sample_transaction.py
+python clients/test_sample_transaction.py
 
 # Expected output from simple_transaction_example.py:
 # 🚀 SIMPLE TRANSACTION EXAMPLE
@@ -265,10 +265,10 @@ rm encoded_tx.txt
 **Alternative: Quick Test Script**
 ```bash
 # Use the built-in transaction test
-python test_proper_flow.py
+python clients/test_sample_transaction.py
 
 # Or test with multiple nodes
-python test_multinode_transaction.py
+python clients/test_sample_transaction.py --node-port 11001
 ```
 
 ### **🧪 Comprehensive Testing Guide**
@@ -289,40 +289,35 @@ curl http://localhost:11000/api/v1/blockchain/ | jq '.blocks | length'
 **2. Transaction Flow Tests**
 ```bash
 # Single transaction test
-python test_sample_transaction.py
+python clients/test_sample_transaction.py
 
-# Multiple transaction test  
-python test_multinode_transaction.py
-
-# Proper transaction flow test
-python test_proper_flow.py
+# Multiple transaction test
+python clients/send_100_transactions.py
 
 # Gulf Stream transaction forwarding test
-python test_gulf_stream_transactions.py
+python tests/test_gulf_stream_transactions.py
 ```
 
 **3. Performance & Load Tests**
 ```bash
+# Performance metrics
+python tests/test_performance_metrics.py
+
 # Comprehensive performance analysis
-python test_comprehensive_performance.py
-
-# Quick performance check
-python test_quick_check.py
-
-# Force block creation test
-python test_force_block.py
+python tools/comprehensive_metrics.py
 ```
 
 **4. Solana Component Tests**
 ```bash
-# PoH and Turbine integration test
-python test_poh_turbine.py
+# Turbine integration test
+python tests/simple_turbine_test.py
 
 # Solana validation test (complete compliance)
-python test_solana_validation.py
+python tests/test_solana_validation.py
 
-# Fast Gulf Stream test
-python test_fast_gulf_stream.py
+# Gulf Stream forwarding tests
+python tests/test_gulf_stream_fix.py
+python tests/test_gulf_stream_4_leaders.py
 ```
 
 #### **Transaction Testing Patterns**
@@ -370,14 +365,8 @@ for i in range(20):
 
 **Real-time Transaction Monitoring:**
 ```bash
-# Monitor transaction processing
-python monitor_logs.py watch transactions node_10000
-
-# Monitor Gulf Stream forwarding
-python monitor_logs.py watch network node_10000
-
-# Monitor block creation
-python monitor_logs.py watch consensus node_10000
+# Tail node logs (start_nodes.sh writes logs/nodeN.log)
+tail -f logs/node1.log
 ```
 
 **Check Transaction Pool:**
@@ -408,13 +397,13 @@ curl http://localhost:11000/api/v1/blockchain/ | jq '[.blocks[].transactions | l
 curl http://localhost:11000/api/v1/blockchain/leader/current/ | jq
 
 # Verify node connectivity
-python leader_monitor.py --once
+python tools/leader_monitor.py --once
 
 # Check transaction pool
 curl http://localhost:11000/api/v1/transaction/transaction_pool/ | jq '. | length'
 
-# Force a block creation for testing
-python test_force_block.py
+# Check recent blocks
+curl http://localhost:11000/api/v1/blockchain/ | jq '.blocks[-3:] | length'
 ```
 
 **Invalid Signature Errors:**
@@ -427,8 +416,8 @@ with open('keys/genesis_public_key.pem', 'r') as f:
     print('Public key loaded:', len(f.read()), 'characters')
 "
 
-# Test signature creation
-python test_transaction_create.py
+# If you suspect key mismatch, re-run key generation:
+./scripts/generate_keys.sh
 ```
 
 **Network Connectivity Issues:**
@@ -449,17 +438,17 @@ netstat -an | grep :11000
 ✅ **Prerequisites Check:**
 - [ ] All nodes started: `./start_nodes.sh`
 - [ ] Keys generated: `ls keys/` shows .pem files
-- [ ] Leader selection active: `python leader_monitor.py --once`
+- [ ] Leader selection active: `python tools/leader_monitor.py --once`
 
 ✅ **Basic Transaction Test:**
 - [ ] Node connectivity: `curl http://localhost:11000/api/v1/health/`
-- [ ] Simple transaction: `python test_sample_transaction.py`
+- [ ] Simple transaction: `python clients/test_sample_transaction.py`
 - [ ] Blockchain updated: Check block count increased
 
 ✅ **Advanced Testing:**
-- [ ] Multi-node test: `python test_multinode_transaction.py`
-- [ ] Performance test: `python test_comprehensive_performance.py`
-- [ ] Solana compliance: `python test_solana_validation.py`
+- [ ] Gulf Stream forwarding: `python tests/test_gulf_stream_transactions.py`
+- [ ] Load test: `python clients/send_100_transactions.py`
+- [ ] Solana compliance: `python tests/test_solana_validation.py`
 
 ### **📊 Transaction Performance Metrics**
 
@@ -482,7 +471,7 @@ Real-time monitoring of leader selection and consensus:
 
 ```bash
 # Continuous leader monitoring (recommended)
-python leader_monitor.py
+python tools/leader_monitor.py
 
 # Output shows real-time leader information:
 # ═══════════════════════════════════════════
@@ -503,65 +492,25 @@ python leader_monitor.py
 # └─ Slot 153: node_10001
 
 # Monitor specific node
-python leader_monitor.py --node-port 11001
+python tools/leader_monitor.py --node-port 11001
 
 # Single check (non-continuous)
-python leader_monitor.py --once
+python tools/leader_monitor.py --once
 
 # Quick API test
-./test_leader_apis.sh
+./scripts/test_leader_apis.sh
 ```
 
 ### **📋 Log Overview**
 ```bash
-# Show all available logs
-python monitor_logs.py summary
-
-# Output shows organized log structure:
-# 📁 consensus/     - PoH, Sealevel, Turbine, quantum consensus
-# 📁 transactions/ - Transaction processing logs
-# 📁 network/      - P2P, Gulf Stream, API logs
-# 📁 performance/  - Timing and throughput metrics
-# 📁 errors/       - Error aggregation
-```
-
-### **🎯 Component-Specific Monitoring**
-```bash
-# Watch Proof of History in real-time
-python monitor_logs.py watch poh node_10000
-
-# Monitor transaction processing
-python monitor_logs.py watch transactions node_10000
-
-# Watch consensus decisions
-python monitor_logs.py watch consensus node_10000
-
-# Monitor parallel execution
-python monitor_logs.py watch sealevel node_10000
-
-# Watch block propagation
-python monitor_logs.py watch turbine node_10000
+# Tail logs for a node
+tail -f logs/node1.log
 ```
 
 ### **📈 Performance Analysis**
 ```bash
-# Analyze performance metrics (last hour)
-python monitor_logs.py performance node_10000
-
-# Analyze last 4 hours
-python monitor_logs.py performance node_10000 --hours 4
-
-# View recent logs
-python monitor_logs.py tail performance node_10000 --lines 50
-```
-
-### **🚨 Error Monitoring**
-```bash
-# Watch for errors across all components
-python monitor_logs.py watch errors node_10000
-
-# View recent errors
-python monitor_logs.py tail errors node_10000
+# Run a comprehensive performance report
+python tools/comprehensive_metrics.py
 ```
 
 ## 🧪 **Testing**
@@ -574,10 +523,10 @@ python monitor_logs.py tail errors node_10000
 curl http://localhost:11000/api/v1/health/
 
 # Quick transaction test
-python test_sample_transaction.py
+python clients/test_sample_transaction.py
 
 # Quick leader check  
-python leader_monitor.py --once
+python tools/leader_monitor.py --once
 ```
 
 ### **Test Categories Overview**
@@ -588,17 +537,18 @@ python leader_monitor.py --once
 - **Leader selection**: Verify quantum consensus working
 
 **💰 Transaction Tests:**
-- **Simple transaction**: `python test_sample_transaction.py`
-- **Multi-node transfer**: `python test_multinode_transaction.py`  
-- **High-volume testing**: `python test_comprehensive_performance.py`
+- **Simple transaction**: `python clients/test_sample_transaction.py`
+- **High-volume testing**: `python clients/send_100_transactions.py`
+- **Gulf Stream forwarding**: `python tests/test_gulf_stream_transactions.py`
 
 **⚡ Solana Component Tests:**
-- **Complete pipeline**: `python test_solana_validation.py`
-- **PoH + Turbine**: `python test_poh_turbine.py`
-- **Gulf Stream**: `python test_fast_gulf_stream.py`
+- **Complete pipeline**: `python tests/test_solana_validation.py`
+- **PoH + Turbine**: `python tests/simple_turbine_test.py`
+- **Gulf Stream**: `python tests/test_gulf_stream_fix.py`
 
 **📊 Performance Tests:**
-- **TPS analysis**: `python test_comprehensive_performance.py`
+- **TPS analysis**: `python tests/test_performance_metrics.py`
+- **Comprehensive report**: `python tools/comprehensive_metrics.py`
 - **Load testing**: Multi-threaded transaction submission
 - **Latency analysis**: End-to-end timing measurements
 
@@ -730,19 +680,19 @@ Enhanced monitoring capabilities with automated tools:
 
 ```bash
 # Continuous leader monitoring (Python script)
-python leader_monitor.py
+python tools/leader_monitor.py
 
 # Monitor specific node
-python leader_monitor.py --node-port 11001
+python tools/leader_monitor.py --node-port 11001
 
 # Single-time check
-python leader_monitor.py --once
+python tools/leader_monitor.py --once
 
 # Quick API test (Bash script)
-./test_leader_apis.sh
+./scripts/test_leader_apis.sh
 
 # API testing with specific node
-./test_leader_apis.sh 11002
+./scripts/test_leader_apis.sh 11002
 ```
 
 ### **Blockchain Endpoints**
@@ -796,7 +746,7 @@ GET http://localhost:11000/api/v1/health/
 curl http://localhost:11000/api/v1/health/
 
 # Check leader status
-python leader_monitor.py --once
+python tools/leader_monitor.py --once
 
 # Check transaction pool
 curl http://localhost:11000/api/v1/transaction/transaction_pool/ | jq '. | length'
@@ -826,33 +776,31 @@ openssl version
 
 # Regenerate keys
 rm keys/*.pem
-./generate_keys.sh
+./scripts/generate_keys.sh
 ```
 
 #### **Nodes Not Connecting**
 ```bash
 # Check node logs
-python monitor_logs.py tail network node_10000
+tail -n 200 logs/node1.log
 
 # Verify network connectivity
 curl http://localhost:11000/api/v1/health/
 ```
 
-#### **Transaction Not Included in Blocks** ⭐ **KNOWN ISSUE**
+#### **Transaction Not Included in Blocks**
 ```bash
-# Current issue: Transactions are submitted successfully but not included in blocks
-# This is due to leader selection and block creation timing mismatch
+# Check current leader
+curl http://localhost:11000/api/v1/blockchain/leader/current/ | jq
 
-# Check transaction submission
-curl http://localhost:11000/api/v1/transaction/create/ \
-  -X POST -H "Content-Type: application/json" \
-  -d '{"transaction": "<base64_encoded_transaction>"}'
+# Check pending transactions
+curl http://localhost:11000/api/v1/transaction/transaction_pool/ | jq '. | length'
 
-# Check if transaction pool is empty (indicates processing)
-curl http://localhost:11000/api/v1/transaction/transaction_pool/
+# Check recent blocks
+curl http://localhost:11000/api/v1/blockchain/ | jq '.blocks[-3:] | length'
 
-# Workaround: Force block creation through leader monitoring
-python leader_monitor.py 11000 1 --detailed
+# Detailed leader monitoring
+python tools/leader_monitor.py 11000 1 --detailed
 ```
 
 #### **Leader Selection Issues** ⭐ **NEW**
@@ -864,7 +812,7 @@ curl http://localhost:11000/api/v1/blockchain/leader/current/
 curl http://localhost:11000/api/v1/blockchain/leader/quantum-selection/
 
 # Monitor leader selection process
-python leader_monitor.py --once
+python tools/leader_monitor.py --once
 
 # Check if nodes are properly connected
 curl http://localhost:11000/api/v1/health/ | jq '.consensus'
@@ -873,8 +821,8 @@ curl http://localhost:11000/api/v1/health/ | jq '.consensus'
 #### **Leader Selection Not Starting**
 ```bash
 # Ensure auto-start is working (should start within 2-3 seconds)
-# Check blockchain logs for leader selection initialization
-python monitor_logs.py tail consensus node_10000
+# Check node logs for leader selection initialization
+tail -n 200 logs/node1.log
 
 # Manually trigger if needed (shouldn't be necessary)
 # Leader selection now starts automatically on network startup
@@ -884,11 +832,11 @@ python monitor_logs.py tail consensus node_10000
 # Check system resources
 htop
 
-# Monitor performance logs
-python monitor_logs.py watch performance node_10000
+# Generate a performance report
+python tools/comprehensive_metrics.py
 
 # Monitor leader selection performance
-python leader_monitor.py
+python tools/leader_monitor.py
 
 # Tune configuration parameters
 # Edit blockchain/consensus/ configuration files
@@ -901,7 +849,7 @@ export LOG_LEVEL=DEBUG
 python run_node.py --ip localhost --node_port 10000 --api_port 11000
 
 # View debug logs
-python monitor_logs.py watch debug node_10000
+tail -n 200 -f logs/node1.log
 ```
 
 ## 📊 **Performance Benchmarks**
@@ -942,35 +890,35 @@ blockchain/
 │   └── api_v1/
 │       └── blockchain/
 │           └── views.py # NEW: Leader selection endpoints
+├── clients/            # Client scripts (transaction submitters)
+├── scripts/            # Shell scripts
 ├── tests/              # Test scripts
+├── tools/              # Diagnostics and ops tools
+├── docs/               # Documentation
 ├── keys/               # Cryptographic keys
 ├── logs/               # Enhanced logging output
-├── leader_monitor.py   # NEW: Real-time leader monitoring tool
-├── api_test.py         # NEW: Python API testing script
-├── test_leader_apis.sh # NEW: Bash API testing script
-└── LEADER_MONITORING_GUIDE.md # NEW: Complete API documentation
+└── genesis_config/     # Genesis file + bootstrap keys
 ```
 
 ### **Adding New Features** ⭐ **UPDATED**
 1. **New consensus mechanism**: Extend `blockchain/consensus/`
 2. **New transaction types**: Modify `blockchain/transaction/`
 3. **New APIs**: Add endpoints in `api/` (see leader monitoring APIs as example)
-4. **New monitoring**: Extend `monitor_logs.py` or create tools like `leader_monitor.py`
+4. **New monitoring**: Add scripts under `tools/` or `monitoring/`
 5. **Leader selection enhancements**: Modify `blockchain/quantum_consensus/`
 
 ### **Contributing**
 1. Fork the repository
 2. Create feature branch: `git checkout -b feature/new-feature`
 3. Add tests for new functionality
-4. Ensure all tests pass: `python test_solana_flow.py`
+4. Ensure all tests pass: `python tests/test_solana_validation.py`
 5. Submit pull request
 
 ## 📚 **Additional Resources**
 
 ### **Documentation** ⭐ **UPDATED**
-- **[LEADER_MONITORING_GUIDE.md](LEADER_MONITORING_GUIDE.md)** - NEW: Complete leader monitoring API guide
-- **[CLEANUP_COMPLETE.md](CLEANUP_COMPLETE.md)** - Project cleanup summary
-- **[BFT_CONSENSUS_IMPLEMENTATION_PLAN.md](BFT_CONSENSUS_IMPLEMENTATION_PLAN.md)** - Consensus architecture
+- **[blockchain/docs/LEADER_MONITORING_GUIDE.md](blockchain/docs/LEADER_MONITORING_GUIDE.md)** - Leader monitoring API guide
+- **[blockchain/docs/LEADER_SCHEDULE_GUIDE.md](blockchain/docs/LEADER_SCHEDULE_GUIDE.md)** - Leader schedule guide
 
 ### **Architecture References**
 - **Solana Whitepaper**: Proof of History and parallel processing concepts
@@ -984,10 +932,10 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 ### **Support** ⭐ **ENHANCED**
 
 - **Issues**: Report bugs and request features via GitHub Issues
-- **Monitoring**: Use `python monitor_logs.py summary` for system status
-- **Leader Selection**: Use `python leader_monitor.py` for real-time leader monitoring
-- **API Testing**: Use `./test_leader_apis.sh` for quick API verification
-- **Documentation**: See `LEADER_MONITORING_GUIDE.md` for complete API documentation
+- **Monitoring**: Tail logs (e.g. `tail -f logs/node1.log`)
+- **Leader Selection**: Use `python tools/leader_monitor.py` for real-time leader monitoring
+- **API Testing**: Use `./scripts/test_leader_apis.sh` for quick API verification
+- **Documentation**: See `docs/LEADER_MONITORING_GUIDE.md` for complete API documentation
 
 ---
 
@@ -1009,7 +957,7 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 - ⭐ **Continuous Updates**: Leader schedules refreshed every 30 seconds automatically  
 - ⭐ **Dynamic Discovery**: New nodes trigger immediate leader schedule updates
 - ⭐ **Monitoring Tools**: Python and bash scripts for real-time leader tracking
-- ⭐ **Complete Documentation**: `LEADER_MONITORING_GUIDE.md` with examples and integration patterns
+- ⭐ **Complete Documentation**: `docs/LEADER_MONITORING_GUIDE.md` with examples and integration patterns
 
 ### **Key Features Added**
 **v2.1 Transaction & Testing Enhancements:**
@@ -1022,7 +970,7 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 **v2.0 Leader Selection & Monitoring:**
 1. **API Endpoints**: `/leader/current/`, `/leader/upcoming/`, `/leader/quantum-selection/`, `/leader/schedule/`
-2. **Monitoring Tools**: `leader_monitor.py`, `api_test.py`, `test_leader_apis.sh`
+2. **Monitoring Tools**: `tools/leader_monitor.py`, `tests/api_test.py`, `scripts/test_leader_apis.sh`
 3. **Auto-start**: No waiting for transactions - leader selection begins immediately
 4. **Background Processing**: Continuous 30-second updates maintain fresh schedules
 5. **Network Intelligence**: Auto-discovery triggers dynamic leader updates
@@ -1039,13 +987,13 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 ./start_nodes.sh
 
 # Test transaction submission (NEW - recommended for beginners)
-python simple_transaction_example.py
+python clients/simple_transaction_example.py
 
 # Alternative transaction tests
-python test_sample_transaction.py
+python clients/test_sample_transaction.py
 
 # Monitor leaders
-python leader_monitor.py --once
+python tools/leader_monitor.py --once
 
 # Check node health
 curl http://localhost:11000/api/v1/health/
@@ -1070,5 +1018,5 @@ curl -X POST http://localhost:11000/api/v1/transaction/create/ \
 ### **Important Files**
 - **Keys**: `keys/genesis_*_key.pem` (for testing)
 - **Start Script**: `./start_nodes.sh`
-- **Transaction Examples**: `simple_transaction_example.py` (NEW), `test_sample_transaction.py`, `test_proper_flow.py`
-- **Monitoring**: `leader_monitor.py`, `monitor_logs.py`
+- **Transaction Examples**: `clients/simple_transaction_example.py`, `clients/test_sample_transaction.py`, `clients/send_100_transactions.py`
+- **Monitoring**: `tools/leader_monitor.py`, `tools/comprehensive_metrics.py`, `logs/node*.log`

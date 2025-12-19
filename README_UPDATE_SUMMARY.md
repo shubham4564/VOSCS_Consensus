@@ -24,7 +24,7 @@ The README.md has been comprehensively updated with detailed transaction testing
 - **Performance optimization**: Configuration tuning guidelines
 
 ### 🚀 New Interactive Example Script
-- **File**: `simple_transaction_example.py`
+- **File**: `clients/simple_transaction_example.py`
 - **Features**: 
   - Interactive command-line interface
   - Detailed step-by-step output
@@ -72,7 +72,7 @@ The README.md has been comprehensively updated with detailed transaction testing
 - `README.md` - Comprehensive update (+396 lines)
 
 ### Created:
-- `simple_transaction_example.py` - Interactive transaction testing script
+- `clients/simple_transaction_example.py` - Interactive transaction testing script
 
 ## User Experience Improvements
 
