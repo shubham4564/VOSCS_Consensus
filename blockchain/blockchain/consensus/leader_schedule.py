@@ -1,5 +1,7 @@
 import time
 import hashlib
+import json
+import os
 from typing import List, Dict, Optional
 from blockchain.utils.logger import logger
 
@@ -19,7 +21,9 @@ class LeaderSchedule:
         
         # Current epoch data
         self.current_epoch = 0
-        self.epoch_start_time = time.time()
+        
+        # Load shared cluster start time to ensure all nodes use the same epoch timing
+        self.epoch_start_time = self._load_cluster_start_time()
         self.current_schedule = {}  # slot_number -> leader_public_key
         self.next_schedule = {}     # Pre-computed next epoch schedule
         
@@ -35,7 +39,35 @@ class LeaderSchedule:
             "leader_advance_time_seconds": self.leader_advance_time
         })
     
+    def _load_cluster_start_time(self) -> float:
+        """Load the shared cluster start time from genesis_config/cluster_start_time.json"""
+        # Try multiple possible paths since script can be run from different directories
+        possible_paths = [
+            "genesis_config/cluster_start_time.json",
+            "blockchain/genesis_config/cluster_start_time.json",
+            "../genesis_config/cluster_start_time.json",
+            "../../genesis_config/cluster_start_time.json",
+        ]
+        
+        for path in possible_paths:
+            if os.path.exists(path):
+                try:
+                    with open(path, 'r') as f:
+                        data = json.load(f)
+                        start_time = data.get('epoch_start_time')
+                        if start_time:
+                            logger.info(f"Loaded cluster start time from {path}: {start_time}")
+                            return float(start_time)
+                except Exception as e:
+                    logger.warning(f"Failed to load {path}: {e}")
+        
+        # Fallback: use current time
+        start_time = time.time()
+        logger.warning(f"No cluster_start_time.json found. Using current time: {start_time}")
+        return start_time
+    
     def generate_epoch_schedule(self, epoch_number: int, quantum_consensus, seed_hash: str) -> Dict[int, str]:
+
         """
         Generate leader schedule for an entire epoch using quantum consensus.
         Similar to Solana's leader selection but using our quantum annealing.
@@ -225,7 +257,9 @@ class LeaderSchedule:
     def transition_to_next_epoch(self):
         """Transition to the next epoch and update schedules"""
         self.current_epoch += 1
-        self.epoch_start_time = time.time()
+        # Deterministic epoch boundary progression: advance by configured epoch duration.
+        # Using local wallclock time here can cause nodes to diverge in slot calculations.
+        self.epoch_start_time = float(self.epoch_start_time) + float(self.epoch_duration_seconds)
         self.current_schedule = self.next_schedule.copy()
         self.next_schedule = {}
         

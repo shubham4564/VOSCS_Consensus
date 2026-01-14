@@ -223,7 +223,7 @@ class LeaderSchedule:
     def transition_to_next_epoch(self):
         """Transition to the next epoch and update schedules"""
         self.current_epoch += 1
-        self.epoch_start_time = time.time()
+        self.epoch_start_time = float(self.epoch_start_time) + float(self.epoch_duration_seconds)
         self.current_schedule = self.next_schedule.copy()
         self.next_schedule = {}
         

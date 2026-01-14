@@ -49,10 +49,13 @@ class SlotBasedBlockProducer:
                 current_slot = self.node.blockchain.leader_schedule.get_current_slot()
                 current_leader = self.node.blockchain.leader_schedule.get_current_leader()
                 my_public_key = self.node.wallet.public_key_string()
+
+                def _norm(k: str) -> str:
+                    return "".join(str(k or "").split())
                 
                 # Check if we should produce a block this slot
                 if (current_slot != self.last_slot_produced and 
-                    current_leader == my_public_key):
+                    current_leader and _norm(current_leader) == _norm(my_public_key)):
                     
                     logger.info({
                         "message": "Slot boundary reached - attempting block production",

@@ -29,6 +29,10 @@ class Blockchain:
         
         # Initialize leader schedule
         self.leader_schedule = LeaderSchedule()
+
+        # If we successfully apply a shared cluster epoch start time, store it here.
+        # This prevents later sync paths (e.g. snapshots) from silently diverging slot clocks.
+        self._shared_epoch_start_time: Optional[float] = None
         
         # Initialize block size limit (10MB default)
         self.max_block_size_bytes = 10 * 1024 * 1024
@@ -96,18 +100,36 @@ class Blockchain:
                 # If present, apply a shared cluster start time so all nodes compute
                 # the same slot/epoch boundaries.
                 try:
-                    cluster_start_path = os.path.join("genesis_config", "cluster_start_time.json")
-                    with open(cluster_start_path, "r", encoding="utf-8") as f:
-                        cluster_start = json.load(f)
-                    epoch_start_time = float(cluster_start.get("epoch_start_time"))
-                    self.leader_schedule.epoch_start_time = epoch_start_time
-                    logger.info({
-                        "message": "Applied shared cluster epoch_start_time",
-                        "epoch_start_time": epoch_start_time,
-                        "cluster_start_path": cluster_start_path,
-                    })
-                except Exception:
+                    # Try multiple paths - the file is written to genesis_config/cluster_start_time.json
+                    # at the repo root by start_nodes.sh
+                    possible_paths = [
+                        os.path.join(os.path.dirname(__file__), "..", "..", "genesis_config", "cluster_start_time.json"),  # ../../genesis_config/
+                        os.path.join(os.path.dirname(__file__), "..", "genesis_config", "cluster_start_time.json"),  # ../genesis_config/
+                        "genesis_config/cluster_start_time.json",  # Fallback
+                        "blockchain/genesis_config/cluster_start_time.json",  # Fallback
+                    ]
+                    
+                    cluster_start_path = None
+                    for path in possible_paths:
+                        abs_path = os.path.abspath(path)
+                        if os.path.exists(abs_path):
+                            cluster_start_path = abs_path
+                            break
+                    
+                    if cluster_start_path:
+                        with open(cluster_start_path, "r", encoding="utf-8") as f:
+                            cluster_start = json.load(f)
+                        epoch_start_time = float(cluster_start.get("epoch_start_time"))
+                        self.leader_schedule.epoch_start_time = epoch_start_time
+                        self._shared_epoch_start_time = epoch_start_time
+                        logger.info({
+                            "message": "Applied shared cluster epoch_start_time",
+                            "epoch_start_time": epoch_start_time,
+                            "cluster_start_path": cluster_start_path,
+                        })
+                except Exception as e:
                     # Optional; default to local wallclock start.
+                    logger.warning(f"Could not load shared cluster start time: {e}")
                     pass
                 
             except FileNotFoundError:
@@ -158,11 +180,18 @@ class Blockchain:
                     # Register a deterministic validator set for this dev cluster.
                     # We derive validator public keys from local private key PEMs so
                     # every node (on the same machine) registers the same set.
+                    # For a 5-node cluster, only load keys for the bootstrap validator and nodes 2-5
                     validator_key_files = []
+                    
+                    # Genesis/bootstrap validator
                     validator_key_files.extend(sorted(glob.glob(os.path.join("keys", "genesis_private_key.pem"))))
-                    validator_key_files.extend(sorted(glob.glob(os.path.join("keys", "node*_private_key.pem"))))
-                    # Optional fallback key used by start_nodes.sh when nodeN key is missing.
-                    validator_key_files.extend(sorted(glob.glob(os.path.join("keys", "staker_private_key.pem"))))
+                    validator_key_files.extend(sorted(glob.glob(os.path.join("blockchain", "keys", "genesis_private_key.pem"))))
+                    
+                    # Only load node2-5 for a 5-node cluster, not all 100 nodes
+                    # This ensures leaders are only selected from the nodes that are actually running
+                    for i in range(2, 6):  # nodes 2, 3, 4, 5
+                        validator_key_files.extend(sorted(glob.glob(os.path.join("keys", f"node{i}_private_key.pem"))))
+                        validator_key_files.extend(sorted(glob.glob(os.path.join("blockchain", "keys", f"node{i}_private_key.pem"))))
 
                     validator_pubkeys: List[str] = []
                     for key_path in validator_key_files:
@@ -626,14 +655,20 @@ class Blockchain:
     def am_i_current_leader(self, my_public_key: str) -> bool:
         """Check if this node is the current leader"""
         current_leader = self.leader_schedule.get_current_leader()
-        return current_leader == my_public_key
+        def _norm(k: str) -> str:
+            return "".join(str(k or "").split())
+
+        return _norm(current_leader) == _norm(my_public_key)
     
     def am_i_upcoming_leader(self, my_public_key: str, within_seconds: int = 120) -> Optional[Dict]:
         """Check if this node is an upcoming leader within specified time"""
         upcoming_targets = self.leader_schedule.get_gulf_stream_targets()
+
+        def _norm(k: str) -> str:
+            return "".join(str(k or "").split())
         
         for target in upcoming_targets:
-            if target['leader'] == my_public_key and target['time_until_slot'] <= within_seconds:
+            if _norm(target['leader']) == _norm(my_public_key) and target['time_until_slot'] <= within_seconds:
                 return target
         
         return None
@@ -1357,11 +1392,11 @@ class Blockchain:
                     continue
                 
                 try:
-                    # Send block via REST API to the correct sync endpoint
+                    # Send block via REST API to the sync endpoint.
+                    # The API expects: {'type': 'blocks', 'blocks': [ ... ]}.
                     sync_payload = {
-                        'blocks_data': [block_data],  # Send as array for sync endpoint
-                        'source_node': 'leader',
-                        'sync_type': 'emergency_block_distribution'
+                        'type': 'blocks',
+                        'blocks': [block_data],
                     }
                     
                     response = requests.post(
@@ -1371,8 +1406,20 @@ class Blockchain:
                     )
                     
                     if response.status_code in [200, 201]:
-                        distributed_count += 1
-                        logger.info(f"Block {block.block_count} distributed to Node {i+1}")
+                        try:
+                            resp_json = response.json()
+                        except Exception:
+                            resp_json = {}
+
+                        if resp_json.get('success') and resp_json.get('blocks_synchronized', 0) > 0:
+                            distributed_count += 1
+                            logger.info(f"Block {block.block_count} distributed to Node {i+1}")
+                        else:
+                            logger.warning(
+                                f"Node {i+1} did not apply block {block.block_count}: "
+                                f"success={resp_json.get('success')} blocks_synchronized={resp_json.get('blocks_synchronized')} "
+                                f"errors={resp_json.get('errors')}"
+                            )
                     else:
                         logger.warning(f"Failed to distribute to Node {i+1}: HTTP {response.status_code}")
                         
@@ -1514,7 +1561,17 @@ class Blockchain:
                 if self.leader_schedule:
                     self.leader_schedule.current_epoch = schedule_data.get('current_epoch', 0)
                     self.leader_schedule.current_schedule = schedule_data.get('current_schedule', {})
-                    self.leader_schedule.epoch_start_time = schedule_data.get('epoch_start_time', time.time())
+                    # Never let snapshot application silently change a shared slot clock.
+                    # If this node never applied a shared cluster start time, adopt the
+                    # snapshot's epoch_start_time as a best-effort alignment.
+                    snapshot_epoch_start = schedule_data.get('epoch_start_time')
+                    if self._shared_epoch_start_time is None and snapshot_epoch_start is not None:
+                        try:
+                            snapshot_epoch_start = float(snapshot_epoch_start)
+                            self.leader_schedule.epoch_start_time = snapshot_epoch_start
+                            self._shared_epoch_start_time = snapshot_epoch_start
+                        except Exception:
+                            pass
                     logger.info("Applied leader schedule from snapshot")
             
             logger.info(f"CRITICAL FIX: Snapshot applied successfully - synchronized to block {len(self.blocks)}")

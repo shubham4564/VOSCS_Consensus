@@ -8,6 +8,7 @@ It detects running nodes and creates bootstrap connections between them.
 """
 
 import requests
+import sys
 import time
 from typing import List, Dict
 

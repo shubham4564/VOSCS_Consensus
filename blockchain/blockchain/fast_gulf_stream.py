@@ -266,9 +266,12 @@ class FastGulfStreamForwarder:
         Called by leaders when their slot starts.
         """
         current_leader = self.leader_schedule.get_current_leader()
+
+        def _norm(k: str) -> str:
+            return "".join(str(k or "").split())
         
         # If this node is the current leader, return received transactions
-        if leader_public_key == current_leader:
+        if _norm(leader_public_key) == _norm(current_leader):
             transactions = [item['transaction'] for item in self.received_transactions]
             
             # Clear received transactions after retrieval

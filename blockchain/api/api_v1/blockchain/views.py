@@ -351,23 +351,67 @@ async def sync_blockchain(request: Request, sync_data: dict = None):
             
             for block_data in blocks_data:
                 try:
-                    # Reconstruct block object
+                    # Reconstruct block + transactions objects.
+                    # NOTE: We intentionally do *basic* validation here instead of full
+                    # Solana-style state-root verification, because the sync path is used
+                    # for catch-up and the full re-exec verifier assumes local state that
+                    # may not yet include the incoming block.
                     from blockchain.block import Block
+                    from blockchain.transaction.transaction import Transaction
+
+                    reconstructed_txs = []
+                    for tx_data in block_data.get('transactions', []):
+                        if isinstance(tx_data, dict):
+                            tx = Transaction(
+                                sender_public_key=tx_data.get('sender_public_key', ''),
+                                receiver_public_key=tx_data.get('receiver_public_key', ''),
+                                amount=tx_data.get('amount', 0),
+                                type=tx_data.get('type', 'TRANSFER'),
+                            )
+                            if 'id' in tx_data:
+                                tx.id = tx_data.get('id')
+                            if 'timestamp' in tx_data:
+                                tx.timestamp = tx_data.get('timestamp')
+                            if 'signature' in tx_data:
+                                tx.signature = tx_data.get('signature', '')
+                            reconstructed_txs.append(tx)
+                        else:
+                            reconstructed_txs.append(tx_data)
+
+                    block_proposer = block_data.get('forger') or block_data.get('block_proposer') or ''
                     block = Block(
-                        transactions=block_data.get('transactions', []),
-                        forger=block_data.get('forger', ''),
+                        transactions=reconstructed_txs,
+                        last_hash=block_data.get('last_hash', ''),
+                        block_proposer=block_proposer,
                         block_count=block_data.get('block_count', 0),
-                        last_hash=block_data.get('last_hash', '')
                     )
                     block.timestamp = block_data.get('timestamp', 0)
                     block.signature = block_data.get('signature', '')
-                    
-                    # Validate and add block
-                    if node.blockchain.block_valid(block):
+
+                    # Preserve any additional metadata fields so all nodes expose
+                    # consistent block dictionaries via the REST API.
+                    for k, v in block_data.items():
+                        if k in {'transactions', 'last_hash', 'forger', 'block_count', 'timestamp', 'signature'}:
+                            continue
+                        try:
+                            setattr(block, k, v)
+                        except Exception:
+                            # Ignore non-settable / invalid fields
+                            pass
+
+                    # Minimal, deterministic validation for sync
+                    valid = (
+                        node.blockchain.block_count_valid(block)
+                        and node.blockchain.last_block_hash_valid(block)
+                        and node.blockchain.block_proposer_valid(block)
+                        and node.blockchain.transactions_valid(block.transactions)
+                    )
+
+                    if valid:
                         node.blockchain.add_block(block)
                         synchronized_count += 1
                     else:
-                        errors.append(f"Block {block.block_count} validation failed")
+                        errors.append(f"Block {getattr(block, 'block_count', '?')} validation failed")
                         
                 except Exception as e:
                     errors.append(f"Block processing error: {str(e)}")

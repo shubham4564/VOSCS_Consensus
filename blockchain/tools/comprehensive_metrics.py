@@ -253,14 +253,13 @@ class BlockchainMetricsCollector:
             sender = wallets[i % len(wallets)]
             receiver = wallets[(i + 1) % len(wallets)]
             amount = 10.0 + (i % 100)  # Vary amounts from 10 to 110
-            
-            transaction = Transaction(
-                sender.public_key_string(),
+
+            # Use Wallet.create_transaction to construct and sign the transaction
+            transaction = sender.create_transaction(
                 receiver.public_key_string(),
                 amount,
                 "TRANSFER"
             )
-            transaction.sign_transaction(sender)
             transactions.append(transaction)
             
             if (i + 1) % 100 == 0:

@@ -461,7 +461,10 @@ class Node:
         
         # ENHANCED: Current leader should create blocks more frequently if they have transactions
         current_leader = self.blockchain.leader_schedule.get_current_leader()
-        am_current_leader = (current_leader == self.wallet.public_key_string())
+        def _norm(k: str) -> str:
+            return "".join(str(k or "").split())
+
+        am_current_leader = (_norm(current_leader) == _norm(self.wallet.public_key_string()))
         
         # Get available transactions for block creation (Fast Gulf Stream + regular Gulf Stream + local)
         available_transactions = []
@@ -1027,6 +1030,10 @@ class Node:
                 "block_number": block.block_count,
                 "fast_reject": True
             })
+            # If we're on a different fork, ask peers for the full chain so we can
+            # converge on the network's longest chain.
+            logger.info({"message": "Last hash mismatch, requesting full chain"})
+            self.request_chain()
             return
 
         # Expensive validations only if lightweight ones pass
@@ -1143,19 +1150,24 @@ class Node:
         # FIXED: Check if we should propose a block using LEADER SCHEDULE (not quantum consensus directly)
         current_leader = self.blockchain.leader_schedule.get_current_leader()
         my_public_key = self.wallet.public_key_string()
+
+        def _norm(k: str) -> str:
+            return "".join(str(k or "").split())
+
+        am_i_current_leader = bool(current_leader) and (_norm(current_leader) == _norm(my_public_key))
         
         logger.info({
             "message": "Block proposal attempt",
             "current_leader_from_schedule": current_leader[:50] + "..." if current_leader else "None",
             "my_public_key": my_public_key[:50] + "...",
-            "am_i_current_leader": current_leader == my_public_key,
+            "am_i_current_leader": am_i_current_leader,
             "transactions_in_pool": len(self.transaction_pool.transactions),
             "current_blockchain_length": len(self.blockchain.blocks),
             "current_slot": self.blockchain.leader_schedule.get_current_slot()
         })
         
         # ENHANCED: Check if I'm the current leader according to the leader schedule
-        if current_leader == my_public_key:
+        if am_i_current_leader:
             try:
                 # CRITICAL: Check if a block was already received for this round
                 # This prevents race conditions where multiple nodes try to propose blocks simultaneously
@@ -1175,12 +1187,14 @@ class Node:
                 tpu_slot_data = self.tpu_listener.get_slot_transactions()
                 for tpu_entry in tpu_slot_data:
                     tpu_transactions.append(tpu_entry['transaction'])
+
+                leader_id_for_lookup = current_leader or my_public_key
                 
                 # PRIORITY 2: Get Fast Gulf Stream transactions (UDP forwarded)
-                fast_gulf_stream_transactions = self.fast_gulf_stream.get_transactions_for_leader(my_public_key)
+                fast_gulf_stream_transactions = self.fast_gulf_stream.get_transactions_for_leader(leader_id_for_lookup)
                 
                 # PRIORITY 3: Get regular Gulf Stream transactions (in-memory forwarded)
-                gulf_stream_transactions = self.blockchain.gulf_stream_node.get_transactions_for_leader(my_public_key)
+                gulf_stream_transactions = self.blockchain.gulf_stream_node.get_transactions_for_leader(leader_id_for_lookup)
                 
                 # PRIORITY 4: Get local transaction pool transactions
                 local_transactions = self.transaction_pool.transactions.copy()
@@ -1202,9 +1216,14 @@ class Node:
                         seen_tx_ids.add(tx.id)
                 
                 transactions_for_block = unique_transactions
+
+                # ALLOW EMPTY BLOCKS: In a test environment, leaders should produce blocks
+                # every slot to advance the chain, even if empty. This allows transaction-heavy
+                # blocks to be processed and verified properly. Empty blocks can be filtered
+                # by clients for optimization.
                 
                 logger.info({
-                    "message": "Leader packing ALL received transactions (Solana-style)",
+                    "message": "Leader packing available transactions" + (" (empty block)" if len(transactions_for_block) == 0 else ""),
                     "tpu_transactions": len(tpu_transactions),
                     "fast_gulf_stream_count": len(fast_gulf_stream_transactions),
                     "gulf_stream_count": len(gulf_stream_transactions),
@@ -1216,8 +1235,8 @@ class Node:
                     "pack_all_policy": "ENABLED"
                 })
                 
-                # Allow block proposal with any number of transactions (including zero)
-                # Every slot, create a block regardless of transaction count or size
+                # Create a block for every slot, even if empty
+                # This ensures steady chain progress for the consensus protocol to function
                 logger.info({
                     "message": "Creating block for slot interval",
                     "pool_size": len(self.transaction_pool.transactions),

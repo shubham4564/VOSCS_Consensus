@@ -1,4 +1,6 @@
 import logging
+import json
+import os
 import time
 import threading
 from typing import Dict, Optional, List
@@ -26,6 +28,9 @@ class Blockchain:
         
         # Initialize leader schedule
         self.leader_schedule = LeaderSchedule()
+
+        # If we successfully apply a shared cluster epoch start time, store it here.
+        self._shared_epoch_start_time: Optional[float] = None
         
         # Initialize block size limit (10MB default)
         self.max_block_size_bytes = 10 * 1024 * 1024
@@ -89,6 +94,24 @@ class Blockchain:
                     "total_accounts": len(genesis_data["accounts"]),
                     "genesis_file": genesis_file
                 })
+
+                # If present, apply a shared cluster start time so all nodes compute
+                # the same slot/epoch boundaries.
+                try:
+                    pkg_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+                    cluster_start_path = os.path.join(pkg_root, "genesis_config", "cluster_start_time.json")
+                    with open(cluster_start_path, "r", encoding="utf-8") as f:
+                        cluster_start = json.load(f)
+                    epoch_start_time = float(cluster_start.get("epoch_start_time"))
+                    self.leader_schedule.epoch_start_time = epoch_start_time
+                    self._shared_epoch_start_time = epoch_start_time
+                    logger.info({
+                        "message": "Applied shared cluster epoch_start_time",
+                        "epoch_start_time": epoch_start_time,
+                        "cluster_start_path": cluster_start_path,
+                    })
+                except Exception:
+                    pass
                 
             except FileNotFoundError:
                 logger.warning(f"Genesis configuration not found: {genesis_file}")
@@ -1311,11 +1334,9 @@ class Blockchain:
                     continue
                 
                 try:
-                    # Send block via REST API to the correct sync endpoint
                     sync_payload = {
-                        'blocks_data': [block_data],  # Send as array for sync endpoint
-                        'source_node': 'leader',
-                        'sync_type': 'emergency_block_distribution'
+                        'type': 'blocks',
+                        'blocks': [block_data],
                     }
                     
                     response = requests.post(
@@ -1468,7 +1489,14 @@ class Blockchain:
                 if self.leader_schedule:
                     self.leader_schedule.current_epoch = schedule_data.get('current_epoch', 0)
                     self.leader_schedule.current_schedule = schedule_data.get('current_schedule', {})
-                    self.leader_schedule.epoch_start_time = schedule_data.get('epoch_start_time', time.time())
+                    snapshot_epoch_start = schedule_data.get('epoch_start_time')
+                    if self._shared_epoch_start_time is None and snapshot_epoch_start is not None:
+                        try:
+                            snapshot_epoch_start = float(snapshot_epoch_start)
+                            self.leader_schedule.epoch_start_time = snapshot_epoch_start
+                            self._shared_epoch_start_time = snapshot_epoch_start
+                        except Exception:
+                            pass
                     logger.info("Applied leader schedule from snapshot")
             
             logger.info(f"CRITICAL FIX: Snapshot applied successfully - synchronized to block {len(self.blocks)}")
