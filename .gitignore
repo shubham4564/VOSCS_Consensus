@@ -138,6 +138,10 @@ node*_public_key.pem
 *.dsa
 *.ecdsa
 
+# Reports
+reports/
+**/reports/
+
 # Backup and versioning directories
 keys_rsa_backup/
 **/keys_rsa_backup/

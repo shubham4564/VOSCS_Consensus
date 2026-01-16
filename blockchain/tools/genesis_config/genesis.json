@@ -1,0 +1,50 @@
+{
+  "version": "1.0.0",
+  "creation_time": 1640995200,
+  "network_id": "a5ab4619119e585697ca36c5eefb7e303821c3eb24962a485394a3adcce10f3f",
+  "cluster_config": {
+    "hashes_per_tick": 12500,
+    "ticks_per_slot": 64,
+    "slot_duration_seconds": 0.45,
+    "epoch_duration_seconds": 600,
+    "slots_per_epoch": 1333,
+    "leader_advance_time_seconds": 600,
+    "target_lamports_per_signature": 5000,
+    "epoch_warmup": true,
+    "tpu_config": {
+      "enabled": true,
+      "port_range_start": 13000,
+      "port_range_end": 13099,
+      "max_packet_size": 1024
+    },
+    "gulf_stream_config": {
+      "enabled": true,
+      "min_buffer_slots": 200,
+      "max_forwarding_slots": 200,
+      "transaction_lifetime_seconds": 90
+    },
+    "quantum_consensus_config": {
+      "enabled": true,
+      "leader_selection_algorithm": "quantum_annealing",
+      "viable_leader_threshold": 0.1
+    },
+    "inflation": {
+      "initial": 0.08,
+      "terminal": 0.015,
+      "taper": 0.15
+    },
+    "cluster_type": "Development"
+  },
+  "accounts": {
+    "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEXf7XXzkAXuiqeMwxDUw1D/UspzLA\n5QfB/wQGFU8xbX/i5TqjgQc9fZ/5Vo6ZnRC+6EpXNhAYm3glo8Ro7DfdTA==\n-----END PUBLIC KEY-----\n": 900000000,
+    "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE0+WOmPR3HTct6JsM2INLdVYdL/ea\nMRqMjjmpXXeOUB6pnaux92WXmF0ntpdKIB5KsAeHFEvfQxV1UqHLF8QFVg==\n-----END PUBLIC KEY-----\n": 50000000,
+    "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEmoCRDi6iYJYxs3T3Uf+kjTEv3A3S\ndiaH4HB6pPVdLz+dHwKdmeFsg0hdrSUBmDhMJu5GfsteyK7Ca8pqW5Iyzg==\n-----END PUBLIC KEY-----\n": 50000000
+  },
+  "bootstrap_validator": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE0+WOmPR3HTct6JsM2INLdVYdL/ea\nMRqMjjmpXXeOUB6pnaux92WXmF0ntpdKIB5KsAeHFEvfQxV1UqHLF8QFVg==\n-----END PUBLIC KEY-----\n",
+  "bootstrap_vote": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEmoCRDi6iYJYxs3T3Uf+kjTEv3A3S\ndiaH4HB6pPVdLz+dHwKdmeFsg0hdrSUBmDhMJu5GfsteyK7Ca8pqW5Iyzg==\n-----END PUBLIC KEY-----\n",
+  "faucet": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEXf7XXzkAXuiqeMwxDUw1D/UspzLA\n5QfB/wQGFU8xbX/i5TqjgQc9fZ/5Vo6ZnRC+6EpXNhAYm3glo8Ro7DfdTA==\n-----END PUBLIC KEY-----\n",
+  "genesis_hash": "497849ff59fb2ac3d123792199496f292fc79fd148f7b23feb3b93e64c2c7da2",
+  "block_height": 0,
+  "slot": 0,
+  "epoch": 0
+}

@@ -11,7 +11,8 @@ Baselines implemented:
 - greedy_score: always pick highest suitability score
 - weighted_score: sample proposer weighted by suitability score
 - round_robin: rotating proposer among active nodes
-- stake_weighted: sample proposer weighted by synthetic stake
+- pos_stake: PoS-style lottery weighted by synthetic stake
+- pow_hash: PoW-style lottery weighted by synthetic hash power
 
 Key evaluation metrics (per strategy):
 - Proposer Quality Index (PQI): mean and p95 ground-truth capability
@@ -110,14 +111,16 @@ def _compute_nakamoto_coefficient(selection_counts: Counter) -> int:
 def _build_simulation_environment(cfg: SimulationConfig):
     """Initialize consensus object and synthetic node attributes.
 
-    Returns (consensus, ground_truth, stake, online_prob, is_attacker).
+    Returns (consensus, node_ids, ground_truth, stake, hash_power, online_prob, is_attacker).
     """
     random.seed(cfg.seed)
 
-    consensus = QuantumAnnealingConsensus(initialize_genesis=False)
+    # Use verbose=False to suppress key generation messages during simulation
+    consensus = QuantumAnnealingConsensus(initialize_genesis=False, verbose=False)
 
     ground_truth: Dict[str, float] = {}
     stake: Dict[str, float] = {}
+    hash_power: Dict[str, float] = {}
     online_prob: Dict[str, float] = {}
     is_attacker: Dict[str, bool] = {}
 
@@ -141,8 +144,11 @@ def _build_simulation_environment(cfg: SimulationConfig):
         ground_truth[node_id] = capability
         is_attacker[node_id] = attacker
 
-        # Synthetic stake loosely correlated with capability
+        # Synthetic stake loosely correlated with capability (for PoS)
         stake[node_id] = max(0.1, capability * random.uniform(5.0, 15.0))
+
+        # Synthetic hash power loosely correlated with capability (for PoW)
+        hash_power[node_id] = max(0.1, capability * random.uniform(8.0, 20.0))
 
         # Online probability higher for capable nodes
         online_prob[node_id] = min(0.98, 0.6 + 0.4 * capability)
@@ -151,7 +157,7 @@ def _build_simulation_environment(cfg: SimulationConfig):
         public_key, _ = consensus.ensure_node_keys(node_id)
         consensus.register_node(node_id, public_key)
 
-    return consensus, node_ids, ground_truth, stake, online_prob, is_attacker
+    return consensus, node_ids, ground_truth, stake, hash_power, online_prob, is_attacker
 
 
 def _update_round_metrics(
@@ -201,15 +207,31 @@ def _update_round_metrics(
     return online_state
 
 
-def _select_greedy(consensus: QuantumAnnealingConsensus, candidate_nodes: List[str]) -> str:
+def _select_greedy(consensus: QuantumAnnealingConsensus, candidate_nodes: List[str], ground_truth: Dict[str, float]) -> str:
+    """Greedy baseline: pick node with highest SINGLE metric (uptime only).
+    
+    This simulates a naive greedy approach that doesn't use the sophisticated
+    multi-metric suitability scoring of quantum consensus. It only looks at
+    one metric (uptime/last_seen), making it susceptible to gaming.
+    """
     best_node = None
-    best_score = -float("inf")
+    best_uptime = -float("inf")
+    now = time.time()
+    
     for node_id in candidate_nodes:
-        score = consensus.calculate_suitability_score(node_id)
-        if score > best_score:
-            best_score = score
+        node_data = consensus.nodes.get(node_id)
+        if not node_data:
+            continue
+        # Simple greedy: just pick most recently seen (highest uptime signal)
+        last_seen = node_data.get("last_seen", 0)
+        uptime_score = max(0, now - last_seen)  # Inverted: lower is better
+        uptime_score = 1.0 / (1.0 + uptime_score)  # Convert to "higher is better"
+        
+        if uptime_score > best_uptime:
+            best_uptime = uptime_score
             best_node = node_id
-    return best_node  # type: ignore[return-value]
+    
+    return best_node if best_node else random.choice(candidate_nodes)
 
 
 def _select_weighted_score(
@@ -245,6 +267,18 @@ def _select_stake_weighted(
     return random.choices(candidate_nodes, weights=probs, k=1)[0]
 
 
+def _select_pow_hash_lottery(
+    candidate_nodes: List[str], hash_power: Dict[str, float]
+) -> str:
+    """PoW-style lottery: select proposer proportionally to hash power."""
+    weights = [max(0.0, hash_power.get(n, 0.0)) for n in candidate_nodes]
+    total = sum(weights)
+    if total <= 0:
+        return random.choice(candidate_nodes)
+    probs = [w / total for w in weights]
+    return random.choices(candidate_nodes, weights=probs, k=1)[0]
+
+
 def _simulate_block_outcome(capability: float) -> Tuple[bool, float]:
     """Return (success, block_time_seconds) based on capability.
 
@@ -263,14 +297,21 @@ def _simulate_block_outcome(capability: float) -> Tuple[bool, float]:
 
 
 def run_simulation(cfg: SimulationConfig) -> Dict[str, StrategyMetrics]:
-    consensus, node_ids, ground_truth, stake, online_prob, is_attacker = _build_simulation_environment(cfg)
+    consensus, node_ids, ground_truth, stake, hash_power, online_prob, is_attacker = _build_simulation_environment(cfg)
 
     # Pre-compute global top-k true nodes by capability
     sorted_by_truth = sorted(node_ids, key=lambda n: ground_truth[n], reverse=True)
     top_k_nodes = set(sorted_by_truth[: cfg.top_k_for_error])
 
     # Per-strategy tracking
-    strategies = ["quantum", "greedy_score", "weighted_score", "round_robin", "stake_weighted"]
+    strategies = [
+        "quantum",
+        "greedy_score",
+        "weighted_score",
+        "round_robin",
+        "pos_stake",
+        "pow_hash",
+    ]
 
     selections: Dict[str, List[str]] = {s: [] for s in strategies}
     pqi_values: Dict[str, List[float]] = {s: [] for s in strategies}
@@ -306,8 +347,8 @@ def run_simulation(cfg: SimulationConfig) -> Dict[str, StrategyMetrics]:
         if quantum_selected not in active_nodes:
             quantum_selected = random.choice(active_nodes)
 
-        # GREEDY: highest suitability score among active nodes
-        greedy_selected = _select_greedy(consensus, candidate_nodes)
+        # GREEDY: highest suitability score among active nodes (single-metric naive approach)
+        greedy_selected = _select_greedy(consensus, candidate_nodes, ground_truth)
 
         # WEIGHTED SCORE: random by suitability
         weighted_selected = _select_weighted_score(consensus, candidate_nodes)
@@ -315,15 +356,19 @@ def run_simulation(cfg: SimulationConfig) -> Dict[str, StrategyMetrics]:
         # ROUND ROBIN among active nodes
         rr_selected, rr_index = _select_round_robin(candidate_nodes, rr_index)
 
-        # STAKE WEIGHTED among active nodes
-        stake_selected = _select_stake_weighted(candidate_nodes, stake)
+        # PoS: stake-weighted lottery among active nodes
+        pos_selected = _select_stake_weighted(candidate_nodes, stake)
+
+        # PoW: hash-power-weighted lottery among active nodes
+        pow_selected = _select_pow_hash_lottery(candidate_nodes, hash_power)
 
         round_choices = {
             "quantum": quantum_selected,
             "greedy_score": greedy_selected,
             "weighted_score": weighted_selected,
             "round_robin": rr_selected,
-            "stake_weighted": stake_selected,
+            "pos_stake": pos_selected,
+            "pow_hash": pow_selected,
         }
 
         for strategy_name, node_id in round_choices.items():
@@ -404,7 +449,7 @@ def _save_metrics_json(results: Dict[str, StrategyMetrics], cfg: SimulationConfi
                 "pqi_p95": m.pqi_p95,
                 "missed_slot_rate": m.missed_slot_rate,
                 "p95_block_time": m.p95_block_time,
-                "nakamoto_coefficient": m.namoto_coefficient if hasattr(m, "namoto_coefficient") else m.nakamoto_coefficient,
+                "nakamoto_coefficient": m.nakamoto_coefficient,
                 "attacker_share": m.attacker_share,
                 "selection_error_rate": m.selection_error_rate,
             }
@@ -428,8 +473,22 @@ def _plot_results(results: Dict[str, StrategyMetrics], cfg: SimulationConfig, ou
     width = 0.35
 
     fig, ax = plt.subplots(figsize=(10, 5))
-    ax.bar([i - width / 2 for i in x], pqi_mean, width, label="PQI mean")
-    ax.bar([i + width / 2 for i in x], pqi_p95, width, label="PQI p95")
+    bars_mean = ax.bar([i - width / 2 for i in x], pqi_mean, width, label="PQI mean")
+    bars_p95 = ax.bar([i + width / 2 for i in x], pqi_p95, width, label="PQI p95")
+
+    # Annotate bars with numeric values
+    for bars in (bars_mean, bars_p95):
+        for bar in bars:
+            height = bar.get_height()
+            ax.annotate(
+                f"{height:.2f}",
+                xy=(bar.get_x() + bar.get_width() / 2, height),
+                xytext=(0, 3),  # 3 points vertical offset
+                textcoords="offset points",
+                ha="center",
+                va="bottom",
+                fontsize=8,
+            )
 
     ax.set_xticks(x)
     ax.set_xticklabels(strategies, rotation=20)
@@ -447,9 +506,23 @@ def _plot_results(results: Dict[str, StrategyMetrics], cfg: SimulationConfig, ou
     error = [results[s].selection_error_rate for s in strategies]
 
     fig, ax = plt.subplots(figsize=(10, 5))
-    bar1 = ax.bar(x, missed, width, label="Missed slot rate")
-    bar2 = ax.bar([i + width for i in x], attacker, width, label="Attacker proposer share")
-    bar3 = ax.bar([i + 2 * width for i in x], error, width, label="Selection error rate")
+    bar_missed = ax.bar(x, missed, width, label="Missed slot rate")
+    bar_attacker = ax.bar([i + width for i in x], attacker, width, label="Attacker proposer share")
+    bar_error = ax.bar([i + 2 * width for i in x], error, width, label="Selection error rate")
+
+    # Annotate robustness bars with numeric values
+    for bars in (bar_missed, bar_attacker, bar_error):
+        for bar in bars:
+            height = bar.get_height()
+            ax.annotate(
+                f"{height:.2f}",
+                xy=(bar.get_x() + bar.get_width() / 2, height),
+                xytext=(0, 3),
+                textcoords="offset points",
+                ha="center",
+                va="bottom",
+                fontsize=8,
+            )
 
     ax.set_xticks([i + width for i in x])
     ax.set_xticklabels(strategies, rotation=20)
@@ -462,35 +535,34 @@ def _plot_results(results: Dict[str, StrategyMetrics], cfg: SimulationConfig, ou
     plt.savefig(rob_path)
     plt.close(fig)
 
-    # Bar chart 3: p95 block time and Nakamoto coefficient
+    # Bar chart 3: p95 block time only
     p95_bt = [results[s].p95_block_time for s in strategies]
-    nakamoto = [results[s].nakamoto_coefficient for s in strategies]
 
     fig, ax1 = plt.subplots(figsize=(10, 5))
 
-    ax1.bar(x, p95_bt, width, label="p95 block time (s)", color="tab:blue")
-    ax1.set_ylabel("p95 block time (s)", color="tab:blue")
-    ax1.tick_params(axis="y", labelcolor="tab:blue")
+    bar_bt = ax1.bar(x, p95_bt, width, label="p95 block time (s)", color="tab:blue")
+    ax1.set_ylabel("p95 block time (s)")
 
-    ax2 = ax1.twinx()
-    ax2.plot(x, nakamoto, marker="o", color="tab:orange", label="Nakamoto coefficient")
-    ax2.set_ylabel("Nakamoto coefficient", color="tab:orange")
-    ax2.tick_params(axis="y", labelcolor="tab:orange")
+    # Annotate block-time bars
+    for bar in bar_bt:
+        height = bar.get_height()
+        ax1.annotate(
+            f"{height:.2f}",
+            xy=(bar.get_x() + bar.get_width() / 2, height),
+            xytext=(0, 3),
+            textcoords="offset points",
+            ha="center",
+            va="bottom",
+            fontsize=8,
+        )
 
     ax1.set_xticks(x)
     ax1.set_xticklabels(strategies, rotation=20)
-    ax1.set_title("Latency and decentralization metrics")
-
-    # Combined legend
-    lines, labels = [], []
-    for ax in (ax1, ax2):
-        line, label = ax.get_legend_handles_labels()
-        lines.extend(line)
-        labels.extend(label)
-    ax1.legend(lines, labels, loc="upper left")
+    ax1.set_title("p95 Block Time by Strategy")
+    ax1.legend()
 
     plt.tight_layout()
-    lat_path = f"{output_prefix}_latency_decentralization.png"
+    lat_path = f"{output_prefix}_latency.png"
     plt.savefig(lat_path)
     plt.close(fig)
 

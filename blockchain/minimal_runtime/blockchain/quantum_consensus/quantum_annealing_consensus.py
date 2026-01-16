@@ -142,19 +142,27 @@ class QuantumAnnealingConsensus:
     - Quantum annealer solves optimization problem for node selection
     """
     
-    def __init__(self, initialize_genesis=True):
+    def __init__(self, initialize_genesis=True, verbose=True):
         """
         Initialize Quantum Annealing Consensus Mechanism
         
         Args:
             initialize_genesis: Whether to initialize genesis node (set False for tests)
+            verbose: Whether to print status messages (set False for simulations)
         """
+        self.verbose = verbose
         self.nodes = {}  # node_id -> {public_key, uptime, latency, throughput, last_seen, ...}
         self.probe_history = {}  # proof_id -> ProbeProof
         self.used_nonces = set()  # Track used nonces for replay protection
         self.node_keys = {}  # node_id -> (public_key, private_key) for cryptographic operations
         self.measurement_history = {}  # Track measurement windows for metrics calculation
         self.verifiable_uptime_records = {}  # record_id -> VerifiableUptimeRecord
+        
+        # Selection Frequency tracking (C_freq from paper)
+        # Tracks leader selections in sliding window to prevent centralization
+        self.selection_history = []  # List of (slot, node_id) tuples
+        self.selection_frequency_window = 1000  # k = sliding window size (last k slots)
+        self.weight_selection_frequency = 0.20  # Negative weight for centralization penalty
         
         # Probe counters for tracking sent/received probes per node
         self.probe_sent_count = {}  # node_id -> count of probes sent by this node
@@ -186,10 +194,12 @@ class QuantumAnnealingConsensus:
         self.node_active_threshold = SCALABILITY_CONFIG.NODE_ACTIVE_THRESHOLD
         
         # Scoring weights (as per paper methodology)
-        self.weight_uptime = 0.25
-        self.weight_latency = 0.25  # negative weight (lower is better)
-        self.weight_throughput = 0.25
-        self.weight_past_performance = 0.25
+        # Note: These 4 positive metrics sum to 0.80, selection_frequency (0.20) is subtracted
+        self.weight_uptime = 0.20
+        self.weight_latency = 0.20  # normalized so low latency = high score
+        self.weight_throughput = 0.20
+        self.weight_past_performance = 0.20
+        # weight_selection_frequency = 0.20 (defined above, applied as penalty)
         
         # QUBO parameters
         self.penalty_coefficient = 1000.0  # Large P value for constraint enforcement
@@ -250,14 +260,17 @@ class QuantumAnnealingConsensus:
                 # Store keys in memory
                 self.node_keys[node_id] = (public_pem, private_pem)
                 
-                print(f"✅ Loaded keys from files for {node_id}")
+                if self.verbose:
+                    print(f"✅ Loaded keys from files for {node_id}")
                 return public_pem, private_pem
             else:
-                print(f"⚠️  Key files not found for {node_id}, generating new keys")
+                if self.verbose:
+                    print(f"⚠️  Key files not found for {node_id}, generating new keys")
                 return self.generate_node_keys(node_id)
                 
         except Exception as e:
-            print(f"❌ Error loading keys for {node_id}: {e}")
+            if self.verbose:
+                print(f"❌ Error loading keys for {node_id}: {e}")
             return self.generate_node_keys(node_id)
 
     def ensure_node_keys(self, node_id: str) -> Tuple[str, str]:
@@ -2349,6 +2362,42 @@ class QuantumAnnealingConsensus:
         """Legacy method - delegates to verified probe update"""
         self.update_node_metrics_from_verified_probe(node_id, probe_proof)
 
+    def record_leader_selection(self, slot: int, node_id: str) -> None:
+        """
+        Record that a node was selected as leader for a given slot.
+        Maintains sliding window of last k selections for C_freq calculation.
+        """
+        self.selection_history.append((slot, node_id))
+        
+        # Prune old entries outside the sliding window
+        if len(self.selection_history) > self.selection_frequency_window:
+            # Keep only the last k entries
+            self.selection_history = self.selection_history[-self.selection_frequency_window:]
+
+    def calculate_selection_frequency(self, node_id: str) -> float:
+        """
+        Calculate normalized selection frequency C_freq_hat for a node.
+        
+        C_freq(n_i) = count of times node was leader in last k slots
+        C_freq_hat(n_i) = C_freq(n_i) / k  (normalized to [0,1])
+        
+        Returns:
+            Normalized selection frequency in [0, 1].
+            0 = never selected (desirable for rotation)
+            1 = selected every slot (monopolization)
+        """
+        if not self.selection_history:
+            return 0.0
+        
+        # Count selections for this node in the window
+        selection_count = sum(1 for _, selected_node in self.selection_history 
+                             if selected_node == node_id)
+        
+        # Normalize by window size (or actual history length if smaller)
+        window_size = min(len(self.selection_history), self.selection_frequency_window)
+        
+        return selection_count / window_size if window_size > 0 else 0.0
+
     def calculate_uptime(self, node_id: str) -> float:
         """Calculate node uptime based on last seen time"""
         if node_id not in self.nodes:
@@ -2416,6 +2465,9 @@ class QuantumAnnealingConsensus:
         past_perf = (node['proposal_success_count'] - 
                     2 * node['proposal_failure_count'])
         
+        # Selection frequency (centralization penalty) - C_freq_hat in paper
+        selection_freq = self.calculate_selection_frequency(node_id)
+        
         # Normalize
         norm_uptime = normalize_positive(uptime, min(uptimes), max(uptimes))
         norm_latency = normalize_negative(latency, min(latencies) if latencies else 0, 
@@ -2423,12 +2475,15 @@ class QuantumAnnealingConsensus:
         norm_throughput = normalize_positive(throughput, min(throughputs), max(throughputs))
         norm_past_perf = normalize_positive(past_perf, min(past_performances), max(past_performances))
         
-        # Calculate weighted suitability score
+        # Calculate weighted suitability score with selection frequency penalty
+        # Positive metrics (higher is better): uptime, throughput, past_perf, norm_latency
+        # Negative metric (lower is better): selection_freq (penalizes over-selection)
         suitability_score = (
             self.weight_uptime * norm_uptime +
             self.weight_past_performance * norm_past_perf +
-            self.weight_throughput * norm_throughput -
-            self.weight_latency * norm_latency  # Negative because lower latency is better
+            self.weight_throughput * norm_throughput +
+            self.weight_latency * norm_latency -  # norm_latency is already inverted: low latency → high value
+            self.weight_selection_frequency * selection_freq  # SUBTRACT: penalize frequently selected nodes
         )
         
         # Cache the result for performance (with TTL)
@@ -2726,6 +2781,10 @@ class QuantumAnnealingConsensus:
                     "total_nodes": len(self.nodes)
                 })
                 
+                # Record selection for C_freq calculation (decentralization metric)
+                current_slot = len(self.selection_history)
+                self.record_leader_selection(current_slot, candidate_nodes[i])
+                
                 return candidate_nodes[i]
         
         # STEP 7: Fallback - return node with highest score from candidates
@@ -2744,6 +2803,11 @@ class QuantumAnnealingConsensus:
         print(f"⚠️  STEP 7 - Fallback Selection: {fallback_time * 1000:.3f}ms")
         print(f"🎯 CONSENSUS COMPLETE (FALLBACK): {total_time * 1000:.3f}ms total - Selected: {best_node}")
         print("=" * 80)
+        
+        # Record selection for C_freq calculation (decentralization metric)
+        if best_node:
+            current_slot = len(self.selection_history)
+            self.record_leader_selection(current_slot, best_node)
         
         # Log timing for fallback case
         self.logger.info({
