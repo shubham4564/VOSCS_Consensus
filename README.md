@@ -56,7 +56,7 @@ python-json-logger>=2.0.0
 
 ### **1. Clone Repository**
 ```bash
-git clone https://github.com/shubham4564/proofwithquantumannealing.git
+git clone https://github.com/[anonymous]/proofwithquantumannealing.git
 cd proofwithquantumannealing/blockchain
 ```
 
