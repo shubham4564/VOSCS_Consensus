@@ -92,7 +92,7 @@ def main():
     print("📤 Now submitting transaction to demonstrate waiting behavior...")
     
     # Create transaction using simplified approach
-    print("\n� Step 2: Creating transaction...")
+    print("\n Step 2: Creating transaction...")
     try:
         start_create = time.time()
         

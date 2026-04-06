@@ -5,7 +5,7 @@
 
 A high-performance blockchain implementation featuring **Solana-style architecture** with quantum consensus, Proof of History (PoH), parallel execution (Sealevel), and efficient block propagation (Turbine).
 
-## � **Key Features**
+##  **Key Features**
 
 ### ** Quantum Consensus**
 - **Quantum annealing-based leader selection** for deterministic consensus
@@ -25,7 +25,7 @@ A high-performance blockchain implementation featuring **Solana-style architectu
 - **Real-time monitoring**: Live log tailing and component analysis
 - **JSON-structured logs**: Machine-readable for automated analysis
 
-## � **Prerequisites**
+##  **Prerequisites**
 
 ### **System Requirements**
 - **Python 3.8+** (3.9+ recommended)
@@ -52,7 +52,7 @@ dimod>=0.10.0
 python-json-logger>=2.0.0
 ```
 
-## � **Installation**
+##  **Installation**
 
 ### **1. Clone Repository**
 ```bash
@@ -587,7 +587,7 @@ self.thread_pool_size = 8  # Parallel execution threads
 self.max_batch_size = 100  # Transaction batch size
 ```
 
-## � **Docker Deployment**
+##  **Docker Deployment**
 
 ### **Build Docker Image**
 ```bash
@@ -875,7 +875,7 @@ Based on testing with 5 nodes on modern hardware:
 - **Network optimization**: Tune Turbine fanout and shred sizes
 - **Storage optimization**: Implement block pruning for long-running deployments
 
-## � **Development**
+##  **Development**
 
 ### **Code Structure**  **UPDATED**
 ```
