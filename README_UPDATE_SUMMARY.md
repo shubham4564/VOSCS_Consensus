@@ -1,29 +1,29 @@
-# README Update Summary 📖
+# README Update Summary 
 
 ## Overview
 The README.md has been comprehensively updated with detailed transaction testing guidance and enhanced documentation. The file has grown from 678 to 1,074 lines (+396 lines, 58% increase).
 
 ## Major Additions
 
-### 💰 Comprehensive Transaction Testing Guide
+###  Comprehensive Transaction Testing Guide
 - **Complete transaction walkthrough**: From wallet creation to blockchain confirmation
 - **Multiple implementation methods**: Python scripts, direct API calls, curl commands
 - **Transaction patterns**: Self-transfer, multi-node, high-volume testing
 - **Performance metrics**: Detailed benchmarks for each processing stage
 
-### 🧪 Enhanced Testing Documentation
+###  Enhanced Testing Documentation
 - **Test categorization**: Basic connectivity, transaction flow, performance, Solana components
 - **Step-by-step instructions**: Clear guidance for different testing scenarios
 - **Expected outputs**: Sample results for each test type
 - **Troubleshooting guide**: Common issues and debugging steps
 
-### 🔍 Transaction Debugging & Troubleshooting
+###  Transaction Debugging & Troubleshooting
 - **Common issues**: Transaction not included, invalid signatures, connectivity problems
 - **Diagnostic commands**: Health checks, pool status, leader verification
 - **Monitoring tools**: Real-time transaction processing observation
 - **Performance optimization**: Configuration tuning guidelines
 
-### 🚀 New Interactive Example Script
+###  New Interactive Example Script
 - **File**: `clients/simple_transaction_example.py`
 - **Features**: 
   - Interactive command-line interface
@@ -32,7 +32,7 @@ The README.md has been comprehensively updated with detailed transaction testing
   - Error handling and user guidance
   - Customizable parameters (amount, node port, wait time)
 
-### 📊 Enhanced Reference Materials
+###  Enhanced Reference Materials
 - **Quick reference section**: Essential commands and URLs
 - **API endpoints**: Complete list with descriptions
 - **Performance benchmarks**: Updated metrics with transaction processing stages
@@ -40,7 +40,7 @@ The README.md has been comprehensively updated with detailed transaction testing
 
 ## Key Sections Added
 
-1. **💰 Sending Transactions & Testing** (Major new section)
+1. ** Sending Transactions & Testing** (Major new section)
    - Transaction basics and structure
    - Creating and sending transactions (Python + API methods)
    - Comprehensive testing guide

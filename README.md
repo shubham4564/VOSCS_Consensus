@@ -1,4 +1,4 @@
-# 🚀 Quantum-Enhanced Solana-Style Blockchain
+#  Quantum-Enhanced Solana-Style Blockchain
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
@@ -7,25 +7,25 @@ A high-performance blockchain implementation featuring **Solana-style architectu
 
 ## � **Key Features**
 
-### **🔮 Quantum Consensus**
+### ** Quantum Consensus**
 - **Quantum annealing-based leader selection** for deterministic consensus
 - **2-second slot intervals** with continuous leader scheduling
 - **Byzantine fault tolerance** with quantum-enhanced security
 - **Health-based voting system** prioritizing healthy nodes over stake weights
 
-### **⚡ Solana-Style Architecture**
-- **🌊 Gulf Stream**: Direct transaction forwarding to upcoming leaders
-- **⏰ Proof of History**: 5,000 ticks/second cryptographic clock for verifiable ordering
-- **🔄 Sealevel**: Parallel transaction execution with 8-thread processing
-- **🌪️ Turbine**: Efficient block propagation with erasure coding and shred distribution
+### ** Solana-Style Architecture**
+- ** Gulf Stream**: Direct transaction forwarding to upcoming leaders
+- ** Proof of History**: 5,000 ticks/second cryptographic clock for verifiable ordering
+- ** Sealevel**: Parallel transaction execution with 8-thread processing
+- ** Turbine**: Efficient block propagation with erasure coding and shred distribution
 
-### **📊 Enhanced Logging & Monitoring**
+### ** Enhanced Logging & Monitoring**
 - **Component-specific logs**: Separate files for PoH, Sealevel, Turbine, consensus, transactions
 - **Performance metrics**: Real-time TPS monitoring and latency analysis
 - **Real-time monitoring**: Live log tailing and component analysis
 - **JSON-structured logs**: Machine-readable for automated analysis
 
-## �️ **Prerequisites**
+## � **Prerequisites**
 
 ### **System Requirements**
 - **Python 3.8+** (3.9+ recommended)
@@ -82,27 +82,27 @@ ls keys/
 # Should show: genesis_private_key.pem, genesis_public_key.pem, node*_private_key.pem, etc.
 ```
 
-## 🚀 **Quick Start**
+##  **Quick Start**
 
-### **1. Start Blockchain Network** ⭐ **AUTO LEADER SELECTION**
+### **1. Start Blockchain Network**  **AUTO LEADER SELECTION**
 ```bash
 # Start 5 nodes (ports 10000-10004 for P2P, 11000-11004 for API)
 ./start_nodes.sh
 
 # Expected output:
-# 🚀 Starting 5 blockchain nodes...
-# ✅ All 5 nodes started!
-# 📡 Node ports: 10000-10004
-# 🌐 API ports: 11000-11004
-# 📝 Logs: tail -f logs/node1.log
+#  Starting 5 blockchain nodes...
+#  All 5 nodes started!
+#  Node ports: 10000-10004
+#  API ports: 11000-11004
+#  Logs: tail -f logs/node1.log
 
 # NEW: Leader selection now starts automatically!
-# ⭐ Leaders are selected within 2-3 seconds of network startup
-# ⭐ No need to wait for transactions to trigger leader selection
-# ⭐ Continuous leader schedule updates every 30 seconds
+#  Leaders are selected within 2-3 seconds of network startup
+#  No need to wait for transactions to trigger leader selection
+#  Continuous leader schedule updates every 30 seconds
 ```
 
-### **2. Verify Node Status & Leader Selection** ⭐ **ENHANCED**
+### **2. Verify Node Status & Leader Selection**  **ENHANCED**
 ```bash
 # Check if nodes are responding
 curl http://localhost:11000/api/v1/blockchain/ | jq
@@ -141,9 +141,9 @@ python tests/test_solana_validation.py
 python tests/test_performance_metrics.py
 ```
 
-## 💰 **Sending Transactions & Testing**
+##  **Sending Transactions & Testing**
 
-### **🔑 Transaction Basics**
+### ** Transaction Basics**
 
 #### **1. Understanding Transactions**
 The blockchain supports several transaction types:
@@ -164,7 +164,7 @@ The blockchain supports several transaction types:
 }
 ```
 
-### **📝 Creating and Sending Transactions**
+### ** Creating and Sending Transactions**
 
 #### **Option 1: Using Python Scripts (Recommended)**
 
@@ -177,12 +177,12 @@ python clients/simple_transaction_example.py
 python clients/test_sample_transaction.py
 
 # Expected output from simple_transaction_example.py:
-# 🚀 SIMPLE TRANSACTION EXAMPLE
-# ✅ Node is healthy and responsive
-# ✅ Genesis keys loaded successfully  
-# ✅ Transaction created and signed
-# ✅ Transaction submitted successfully!
-# 🎉 New block(s) created - transaction likely included!
+#  SIMPLE TRANSACTION EXAMPLE
+#  Node is healthy and responsive
+#  Genesis keys loaded successfully  
+#  Transaction created and signed
+#  Transaction submitted successfully!
+#  New block(s) created - transaction likely included!
 ```
 
 **Custom Transaction Script:**
@@ -271,7 +271,7 @@ python clients/test_sample_transaction.py
 python clients/test_sample_transaction.py --node-port 11001
 ```
 
-### **🧪 Comprehensive Testing Guide**
+### ** Comprehensive Testing Guide**
 
 #### **Test Categories**
 
@@ -387,7 +387,7 @@ curl http://localhost:11000/api/v1/blockchain/ | jq '.blocks[-1].transactions'
 curl http://localhost:11000/api/v1/blockchain/ | jq '[.blocks[].transactions | length] | add'
 ```
 
-### **🔍 Troubleshooting Transactions**
+### ** Troubleshooting Transactions**
 
 #### **Common Issues & Solutions**
 
@@ -435,22 +435,22 @@ netstat -an | grep :11000
 
 #### **Transaction Testing Checklist**
 
-✅ **Prerequisites Check:**
+ **Prerequisites Check:**
 - [ ] All nodes started: `./start_nodes.sh`
 - [ ] Keys generated: `ls keys/` shows .pem files
 - [ ] Leader selection active: `python tools/leader_monitor.py --once`
 
-✅ **Basic Transaction Test:**
+ **Basic Transaction Test:**
 - [ ] Node connectivity: `curl http://localhost:11000/api/v1/health/`
 - [ ] Simple transaction: `python clients/test_sample_transaction.py`
 - [ ] Blockchain updated: Check block count increased
 
-✅ **Advanced Testing:**
+ **Advanced Testing:**
 - [ ] Gulf Stream forwarding: `python tests/test_gulf_stream_transactions.py`
 - [ ] Load test: `python clients/send_100_transactions.py`
 - [ ] Solana compliance: `python tests/test_solana_validation.py`
 
-### **📊 Transaction Performance Metrics**
+### ** Transaction Performance Metrics**
 
 Expected transaction processing performance:
 
@@ -464,9 +464,9 @@ Expected transaction processing performance:
 | **Block Inclusion Time** | 2-15s | Depends on leader selection timing |
 | **End-to-End Latency** | 3-20s | Submit → Block inclusion → Confirmation |
 
-## 📊 **Monitoring & Logging**
+##  **Monitoring & Logging**
 
-### **📋 Leader Selection Monitoring** ⭐ **NEW**
+### ** Leader Selection Monitoring**  **NEW**
 Real-time monitoring of leader selection and consensus:
 
 ```bash
@@ -475,18 +475,18 @@ python tools/leader_monitor.py
 
 # Output shows real-time leader information:
 # ═══════════════════════════════════════════
-# 🎯 QUANTUM BLOCKCHAIN LEADER MONITOR
+#  QUANTUM BLOCKCHAIN LEADER MONITOR
 # ═══════════════════════════════════════════
-# 🕐 Timestamp: 2024-01-15 10:30:15
-# 🌐 Monitoring Node: localhost:11000
+#  Timestamp: 2024-01-15 10:30:15
+#  Monitoring Node: localhost:11000
 # 
-# 👑 CURRENT LEADER
+#  CURRENT LEADER
 # ├─ Leader: node_10001
 # ├─ Slot: 150
-# ├─ Status: ✅ Valid
+# ├─ Status:  Valid
 # └─ Next Change: 1.2s
 # 
-# 📅 UPCOMING LEADERS
+#  UPCOMING LEADERS
 # ├─ Slot 151: node_10002
 # ├─ Slot 152: node_10000
 # └─ Slot 153: node_10001
@@ -501,21 +501,21 @@ python tools/leader_monitor.py --once
 ./scripts/test_leader_apis.sh
 ```
 
-### **📋 Log Overview**
+### ** Log Overview**
 ```bash
 # Tail logs for a node
 tail -f logs/node1.log
 ```
 
-### **📈 Performance Analysis**
+### ** Performance Analysis**
 ```bash
 # Run a comprehensive performance report
 python tools/comprehensive_metrics.py
 ```
 
-## 🧪 **Testing**
+##  **Testing**
 
-> **📋 See the [Transaction Testing Guide](#-sending-transactions--testing) above for comprehensive transaction testing instructions.**
+> ** See the [Transaction Testing Guide](#-sending-transactions--testing) above for comprehensive transaction testing instructions.**
 
 ### **Quick Testing Commands**
 ```bash
@@ -531,28 +531,28 @@ python tools/leader_monitor.py --once
 
 ### **Test Categories Overview**
 
-**🔧 Basic Tests:**
+** Basic Tests:**
 - **Node connectivity**: `curl` health endpoints
 - **Key verification**: Check genesis and node keys exist
 - **Leader selection**: Verify quantum consensus working
 
-**💰 Transaction Tests:**
+** Transaction Tests:**
 - **Simple transaction**: `python clients/test_sample_transaction.py`
 - **High-volume testing**: `python clients/send_100_transactions.py`
 - **Gulf Stream forwarding**: `python tests/test_gulf_stream_transactions.py`
 
-**⚡ Solana Component Tests:**
+** Solana Component Tests:**
 - **Complete pipeline**: `python tests/test_solana_validation.py`
 - **PoH + Turbine**: `python tests/simple_turbine_test.py`
 - **Gulf Stream**: `python tests/test_gulf_stream_fix.py`
 
-**📊 Performance Tests:**
+** Performance Tests:**
 - **TPS analysis**: `python tests/test_performance_metrics.py`
 - **Comprehensive report**: `python tools/comprehensive_metrics.py`
 - **Load testing**: Multi-threaded transaction submission
 - **Latency analysis**: End-to-end timing measurements
 
-## 🔧 **Configuration**
+##  **Configuration**
 
 ### **Node Configuration**
 Modify node startup parameters in `start_nodes.sh`:
@@ -566,7 +566,7 @@ API_START=11000       # Starting API port
 # Edit start_nodes.sh and change NUM_NODES=10
 ```
 
-### **Consensus Configuration** ⭐ **ENHANCED**
+### **Consensus Configuration**  **ENHANCED**
 Quantum consensus parameters in `blockchain/quantum_consensus/`:
 - **Slot duration**: 2 seconds (configurable)
 - **Leader lookahead**: 5 slots
@@ -611,9 +611,9 @@ docker-compose up -d
 docker-compose up -d --scale node=5
 ```
 
-## 📡 **API Reference**
+##  **API Reference**
 
-### **Leader Selection Monitoring Endpoints** ⭐ **NEW**
+### **Leader Selection Monitoring Endpoints**  **NEW**
 The blockchain now provides comprehensive APIs for monitoring leader selection and consensus:
 
 ```bash
@@ -675,7 +675,7 @@ GET http://localhost:11000/api/v1/blockchain/leader/schedule/
 }
 ```
 
-### **Leader Monitoring Tools** ⭐ **NEW**
+### **Leader Monitoring Tools**  **NEW**
 Enhanced monitoring capabilities with automated tools:
 
 ```bash
@@ -736,9 +736,9 @@ GET http://localhost:11000/api/v1/health/
 }
 ```
 
-## 🔧 **Troubleshooting**
+##  **Troubleshooting**
 
-> **📋 See the [Transaction Troubleshooting Guide](#-troubleshooting-transactions) above for detailed transaction debugging.**
+> ** See the [Transaction Troubleshooting Guide](#-troubleshooting-transactions) above for detailed transaction debugging.**
 
 ### **Quick Diagnostic Commands**
 ```bash
@@ -803,7 +803,7 @@ curl http://localhost:11000/api/v1/blockchain/ | jq '.blocks[-3:] | length'
 python tools/leader_monitor.py 11000 1 --detailed
 ```
 
-#### **Leader Selection Issues** ⭐ **NEW**
+#### **Leader Selection Issues**  **NEW**
 ```bash
 # Leader not being selected
 curl http://localhost:11000/api/v1/blockchain/leader/current/
@@ -852,9 +852,9 @@ python run_node.py --ip localhost --node_port 10000 --api_port 11000
 tail -n 200 -f logs/node1.log
 ```
 
-## 📊 **Performance Benchmarks**
+##  **Performance Benchmarks**
 
-### **Expected Performance** ⭐ **UPDATED**
+### **Expected Performance**  **UPDATED**
 Based on testing with 5 nodes on modern hardware:
 
 | Metric | Value | Notes |
@@ -875,9 +875,9 @@ Based on testing with 5 nodes on modern hardware:
 - **Network optimization**: Tune Turbine fanout and shred sizes
 - **Storage optimization**: Implement block pruning for long-running deployments
 
-## �️ **Development**
+## � **Development**
 
-### **Code Structure** ⭐ **UPDATED**
+### **Code Structure**  **UPDATED**
 ```
 blockchain/
 ├── blockchain/           # Core implementation
@@ -900,7 +900,7 @@ blockchain/
 └── genesis_config/     # Genesis file + bootstrap keys
 ```
 
-### **Adding New Features** ⭐ **UPDATED**
+### **Adding New Features**  **UPDATED**
 1. **New consensus mechanism**: Extend `blockchain/consensus/`
 2. **New transaction types**: Modify `blockchain/transaction/`
 3. **New APIs**: Add endpoints in `api/` (see leader monitoring APIs as example)
@@ -914,9 +914,9 @@ blockchain/
 4. Ensure all tests pass: `python tests/test_solana_validation.py`
 5. Submit pull request
 
-## 📚 **Additional Resources**
+##  **Additional Resources**
 
-### **Documentation** ⭐ **UPDATED**
+### **Documentation**  **UPDATED**
 - **[blockchain/docs/LEADER_MONITORING_GUIDE.md](blockchain/docs/LEADER_MONITORING_GUIDE.md)** - Leader monitoring API guide
 - **[blockchain/docs/LEADER_SCHEDULE_GUIDE.md](blockchain/docs/LEADER_SCHEDULE_GUIDE.md)** - Leader schedule guide
 
@@ -925,11 +925,11 @@ blockchain/
 - **Quantum Computing**: D-Wave quantum annealing for consensus
 - **Byzantine Fault Tolerance**: Enhanced with quantum consensus
 
-## 📄 **License**
+##  **License**
 
 This project is licensed under the MIT License - see the LICENSE file for details.
 
-### **Support** ⭐ **ENHANCED**
+### **Support**  **ENHANCED**
 
 - **Issues**: Report bugs and request features via GitHub Issues
 - **Monitoring**: Tail logs (e.g. `tail -f logs/node1.log`)
@@ -939,25 +939,25 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 ---
 
-**🚀 Ready to build the future of quantum-enhanced blockchain technology!**
+** Ready to build the future of quantum-enhanced blockchain technology!**
 
-## 🆕 **Latest Updates**
+##  **Latest Updates**
 
 ### **v2.1 - Comprehensive Transaction Testing & Health-Based Consensus**
-- 💰 **Complete Transaction Guide**: Step-by-step instructions for creating, signing, and submitting transactions
-- 🧪 **Enhanced Testing Suite**: Multiple testing patterns for different use cases and load scenarios
-- 🔍 **Transaction Troubleshooting**: Detailed debugging guide for common transaction issues
-- ⚕️ **Health-Based Voting**: Consensus now prioritizes healthy nodes over stake weights (100% Solana compliant)
-- 📊 **Performance Metrics**: Detailed transaction processing benchmarks and monitoring
-- 🛠️ **API Examples**: Complete Python and curl examples for transaction submission
+-  **Complete Transaction Guide**: Step-by-step instructions for creating, signing, and submitting transactions
+-  **Enhanced Testing Suite**: Multiple testing patterns for different use cases and load scenarios
+-  **Transaction Troubleshooting**: Detailed debugging guide for common transaction issues
+-  **Health-Based Voting**: Consensus now prioritizes healthy nodes over stake weights (100% Solana compliant)
+-  **Performance Metrics**: Detailed transaction processing benchmarks and monitoring
+-  **API Examples**: Complete Python and curl examples for transaction submission
 
 ### **v2.0 - Enhanced Leader Selection & Monitoring**
-- ⭐ **Automatic Leader Selection**: Leaders selected immediately on network startup (2-3 seconds)
-- ⭐ **Real-time Monitoring APIs**: 4 new endpoints for comprehensive leader monitoring
-- ⭐ **Continuous Updates**: Leader schedules refreshed every 30 seconds automatically  
-- ⭐ **Dynamic Discovery**: New nodes trigger immediate leader schedule updates
-- ⭐ **Monitoring Tools**: Python and bash scripts for real-time leader tracking
-- ⭐ **Complete Documentation**: `docs/LEADER_MONITORING_GUIDE.md` with examples and integration patterns
+-  **Automatic Leader Selection**: Leaders selected immediately on network startup (2-3 seconds)
+-  **Real-time Monitoring APIs**: 4 new endpoints for comprehensive leader monitoring
+-  **Continuous Updates**: Leader schedules refreshed every 30 seconds automatically  
+-  **Dynamic Discovery**: New nodes trigger immediate leader schedule updates
+-  **Monitoring Tools**: Python and bash scripts for real-time leader tracking
+-  **Complete Documentation**: `docs/LEADER_MONITORING_GUIDE.md` with examples and integration patterns
 
 ### **Key Features Added**
 **v2.1 Transaction & Testing Enhancements:**
@@ -975,11 +975,11 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 4. **Background Processing**: Continuous 30-second updates maintain fresh schedules
 5. **Network Intelligence**: Auto-discovery triggers dynamic leader updates
 
-⚠️ **Note**: This is a research and demonstration project. Not intended for production use.
+ **Note**: This is a research and demonstration project. Not intended for production use.
 
 ---
 
-## 🚀 **Quick Reference**
+##  **Quick Reference**
 
 ### **Essential Commands**
 ```bash

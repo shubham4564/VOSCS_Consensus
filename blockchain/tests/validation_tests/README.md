@@ -16,12 +16,12 @@ This directory contains validation tests for the blockchain network. These tests
 - Node connectivity and health
 
 **Features**:
-- 🌐 Monitors multiple nodes simultaneously (ports 11000-11009)
-- 👑 Real-time leader schedule display
-- 🔄 Detects leader changes and epoch transitions
-- 📊 Tracks validation statistics
-- ⏱️ Configurable update intervals
-- 🌊 Gulf Stream protocol status
+-  Monitors multiple nodes simultaneously (ports 11000-11009)
+-  Real-time leader schedule display
+-  Detects leader changes and epoch transitions
+-  Tracks validation statistics
+-  Configurable update intervals
+-  Gulf Stream protocol status
 
 **Usage**:
 ```bash
@@ -84,59 +84,59 @@ pip install aiohttp
 When running, you'll see real-time output like:
 
 ```
-👑 REAL-TIME LEADER SCHEDULE VALIDATION
+ REAL-TIME LEADER SCHEDULE VALIDATION
 ================================================================================
-📅 Started: 2025-07-26 14:30:00
-🌐 Monitoring nodes: 10 nodes (ports 11000-11009)
-⏰ Epoch duration: 120s (2 minutes)
-🕐 Slot duration: 2s
-📊 Total slots per epoch: 60
+ Started: 2025-07-26 14:30:00
+ Monitoring nodes: 10 nodes (ports 11000-11009)
+ Epoch duration: 120s (2 minutes)
+ Slot duration: 2s
+ Total slots per epoch: 60
 ================================================================================
 
-🌐 NODES STATUS (8/10 online)
+ NODES STATUS (8/10 online)
 ──────────────────────────────────────────────────
-✅ Online Nodes:
+ Online Nodes:
    Port 11000: Ready
    Port 11001: Ready
    Port 11002: Ready
    Port 11003: Ready
    Port 11004: Ready
    ... and 3 more
-❌ Offline Nodes:
+ Offline Nodes:
    Port 11008: timeout (Connection timeout)
    Port 11009: offline (Connection refused)
 
-👑 CURRENT LEADER INFORMATION
+ CURRENT LEADER INFORMATION
 ──────────────────────────────────────────────────
-🎯 Current Slot: 15
-👑 Current Leader: -----BEGIN PUBLIC KEY-----MII...
-📊 Epoch Progress: 15/60
-⏱️  Time in Slot: 1.2s / 2s
+ Current Slot: 15
+ Current Leader: -----BEGIN PUBLIC KEY-----MII...
+ Epoch Progress: 15/60
+  Time in Slot: 1.2s / 2s
 
-🔮 UPCOMING LEADERS (Next 5 slots):
+ UPCOMING LEADERS (Next 5 slots):
    1. Slot 16: -----BEGIN PUBLIC KE... (in 0.8s)
    2. Slot 17: -----BEGIN PUBLIC KE... (in 2.8s)
    3. Slot 18: -----BEGIN PUBLIC KE... (in 4.8s)
    4. Slot 19: -----BEGIN PUBLIC KE... (in 6.8s)
    5. Slot 20: -----BEGIN PUBLIC KE... (in 8.8s)
 
-🌊 GULF STREAM STATUS
+ GULF STREAM STATUS
 ──────────────────────────────────
-📤 Transactions Forwarded: 42
-📨 Active Forwarding Pools: 5
-⏱️  Average Forward Time: 15.3ms
-📊 Forward Success Rate: 98.5%
+ Transactions Forwarded: 42
+ Active Forwarding Pools: 5
+  Average Forward Time: 15.3ms
+ Forward Success Rate: 98.5%
 
-📈 VALIDATION STATISTICS
+ VALIDATION STATISTICS
 ──────────────────────────────────
-⏱️  Runtime: 125.3s
-🔄 Total Checks: 62
-✅ Successful Connections: 496
-👑 Leader Changes: 7
-🌅 Epoch Transitions: 1
-📊 Connection Success Rate: 80.0%
+  Runtime: 125.3s
+ Total Checks: 62
+ Successful Connections: 496
+ Leader Changes: 7
+ Epoch Transitions: 1
+ Connection Success Rate: 80.0%
 
-🔄 Last Updated: 14:32:05 (Press Ctrl+C to stop)
+ Last Updated: 14:32:05 (Press Ctrl+C to stop)
 ================================================================================
 ```
 
@@ -170,7 +170,7 @@ class NewValidator:
     
     def run_validation(self):
         # Implement validation logic
-        print("🧪 Running new validation...")
+        print(" Running new validation...")
         # Your validation code here
         return True  # Return success/failure
 
