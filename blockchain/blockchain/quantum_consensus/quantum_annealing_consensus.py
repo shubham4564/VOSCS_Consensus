@@ -131,6 +131,47 @@ except (ImportError, AttributeError, FileNotFoundError):
     SCALABILITY_CONFIG = FallbackConfig()
 
 
+class AblationConfig:
+    """
+    Feature flags for ablation experiments.
+
+    All flags default to True (full system enabled) so existing code is
+    unaffected.  Pass an instance to QuantumAnnealingConsensus to disable
+    individual features and measure their contribution.
+
+    Attributes:
+        use_fairness_penalty:  Include -w_freq * C_freq term in suitability
+                               score.  Set False to measure centralisation
+                               resistance contribution.
+        use_witness_quorum:    Enforce minimum-witness quorum in the probe
+                               protocol.  Set False to measure probe
+                               authentication contribution.
+        use_qubo_solver:       Use the simulated-annealing QUBO solver.
+                               Set False to fall back to direct argmax
+                               (measures whether the annealer is necessary).
+        use_vrf_tiebreak:      Add VRF-based perturbation δi to effective
+                               scores.  Set False to measure deterministic
+                               agreement contribution.
+        witness_quorum_size:   Override the minimum witness count used by
+                               execute_probe_protocol (None = use instance
+                               default).
+    """
+
+    def __init__(
+        self,
+        use_fairness_penalty: bool = True,
+        use_witness_quorum: bool = True,
+        use_qubo_solver: bool = True,
+        use_vrf_tiebreak: bool = True,
+        witness_quorum_size: Optional[int] = None,
+    ) -> None:
+        self.use_fairness_penalty = use_fairness_penalty
+        self.use_witness_quorum = use_witness_quorum
+        self.use_qubo_solver = use_qubo_solver
+        self.use_vrf_tiebreak = use_vrf_tiebreak
+        self.witness_quorum_size = witness_quorum_size
+
+
 class QuantumAnnealingConsensus:
     """
     Quantum Annealing-based Consensus Mechanism for Blockchain.
@@ -142,15 +183,19 @@ class QuantumAnnealingConsensus:
     - Quantum annealer solves optimization problem for node selection
     """
     
-    def __init__(self, initialize_genesis=True, verbose=True):
+    def __init__(self, initialize_genesis=True, verbose=True, ablation_config: Optional["AblationConfig"] = None):
         """
         Initialize Quantum Annealing Consensus Mechanism
         
         Args:
             initialize_genesis: Whether to initialize genesis node (set False for tests)
             verbose: Whether to print status messages (set False for simulations)
+            ablation_config: Optional AblationConfig for ablation experiments.  All
+                             features are enabled when None (default).
         """
         self.verbose = verbose
+        # Ablation feature flags – default to all-enabled
+        self.ablation: AblationConfig = ablation_config if ablation_config is not None else AblationConfig()
         self.nodes = {}  # node_id -> {public_key, uptime, latency, throughput, last_seen, ...}
         self.probe_history = {}  # proof_id -> ProbeProof
         self.used_nonces = set()  # Track used nonces for replay protection
@@ -777,8 +822,17 @@ class QuantumAnnealingConsensus:
         # STEP 8: Quorum Verification
         quorum_start = time.time()
         # 5. Verify quorum requirement (k/3 minimum as per paper)
-        if valid_witnesses < max(1, self.witness_quorum_size // 3):
-            print(f"         ⚠️  Insufficient witnesses: {valid_witnesses} < {self.witness_quorum_size // 3}")
+        # When ablation.use_witness_quorum is False, skip quorum enforcement entirely.
+        effective_quorum = (
+            max(1, self.witness_quorum_size // 3)
+            if self.ablation.use_witness_quorum
+            else 0
+        )
+        # Override quorum size if set via AblationConfig
+        if self.ablation.witness_quorum_size is not None:
+            effective_quorum = max(1, self.ablation.witness_quorum_size // 3)
+        if valid_witnesses < effective_quorum:
+            print(f"         ⚠️  Insufficient witnesses: {valid_witnesses} < {effective_quorum}")
             # Continue with available witnesses for simulation
         quorum_time = time.time() - quorum_start
         print(f"         ✅ Quorum verification: {quorum_time * 1000:.3f}ms")
@@ -2478,12 +2532,17 @@ class QuantumAnnealingConsensus:
         # Calculate weighted suitability score with selection frequency penalty
         # Positive metrics (higher is better): uptime, throughput, past_perf, norm_latency
         # Negative metric (lower is better): selection_freq (penalizes over-selection)
+        freq_term = (
+            self.weight_selection_frequency * selection_freq
+            if self.ablation.use_fairness_penalty
+            else 0.0
+        )
         suitability_score = (
             self.weight_uptime * norm_uptime +
             self.weight_past_performance * norm_past_perf +
             self.weight_throughput * norm_throughput +
             self.weight_latency * norm_latency -  # norm_latency is already inverted: low latency → high value
-            self.weight_selection_frequency * selection_freq  # SUBTRACT: penalize frequently selected nodes
+            freq_term  # SUBTRACT: penalize frequently selected nodes
         )
         
         # Cache the result for performance (with TTL)
@@ -2498,9 +2557,13 @@ class QuantumAnnealingConsensus:
         Calculate effective score S'i = Si + δi for tie-breaking.
         
         Uses VRF output and node's public key for deterministic perturbation.
+        When ablation.use_vrf_tiebreak is False, δi = 0 (no perturbation).
         """
         original_score = self.calculate_suitability_score(node_id)
-        
+
+        if not self.ablation.use_vrf_tiebreak:
+            return original_score
+
         # Generate deterministic perturbation using VRF output and node's public key
         node_pk = self.nodes[node_id]['public_key']
         perturbation_input = f"{vrf_output}{node_pk}"
@@ -2585,7 +2648,20 @@ class QuantumAnnealingConsensus:
         if n == 1:
             print(f"    🎯 Single node optimization - direct selection")
             return [1]  # Only one node, select it
-        
+
+        # Ablation: bypass QUBO solver and use direct argmax instead
+        if not self.ablation.use_qubo_solver:
+            best_idx = 0
+            best_score = float("-inf")
+            for i in range(n):
+                score = -linear_coeff.get(i, 0.0) - self.penalty_coefficient
+                if score > best_score:
+                    best_score = score
+                    best_idx = i
+            solution = [0] * n
+            solution[best_idx] = 1
+            return solution
+
         try:
             # Create BinaryQuadraticModel (BQM) for QUBO problem
             bqm_start = time.time()

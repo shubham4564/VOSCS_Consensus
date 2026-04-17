@@ -6,10 +6,7 @@ from api.main import NodeAPI
 from blockchain.blockchain import Blockchain
 from blockchain.consensus.gulf_stream import GulfStreamProcessor
 from blockchain.consensus.tpu_listener import TPUListener
-import sys
-import os
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from fast_gulf_stream import FastGulfStreamForwarder
+from blockchain.fast_gulf_stream import FastGulfStreamForwarder
 from blockchain.slot_producer import SlotBasedBlockProducer
 from blockchain.p2p.message import Message, MessageType, InventoryItem, InventoryMessage, GetDataMessage
 from blockchain.p2p.socket_communication import SocketCommunication
