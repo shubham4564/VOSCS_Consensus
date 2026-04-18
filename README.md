@@ -33,23 +33,34 @@ A high-performance blockchain implementation featuring **Solana-style architectu
 - **Linux/macOS** (Windows with WSL2)
 
 ### **Python Dependencies**
-```bash
-# Core blockchain
-cryptography>=3.4.8
-ecdsa>=0.17.0
-pycryptodome>=3.15.0
+All dependencies are listed in `blockchain/requirements.txt`:
+```
+# Core blockchain / networking
+cryptography==41.0.5
+p2pnetwork==1.2
+jsonpickle==3.0.2
 
-# Networking & API
-fastapi>=0.68.0
-uvicorn>=0.15.0
-requests>=2.26.0
+# Web API
+fastapi==0.104.1
+uvicorn==0.23.2
+starlette==0.27.0
+pydantic==2.11.7
 
-# Quantum consensus (optional)
-dwave-ocean-sdk>=4.0.0
-dimod>=0.10.0
+# Quantum annealing
+dimod==0.12.20
+dwave-samplers==1.6.0
 
-# Logging & monitoring
-python-json-logger>=2.0.0
+# HTTP / async
+aiohttp==3.12.14
+requests==2.32.4
+
+# Numerics / plotting
+numpy==2.3.1
+matplotlib==3.10.3
+
+# Observability
+psutil==7.0.0
+python-json-logger==2.0.7
 ```
 
 ##  **Installation**
@@ -63,12 +74,12 @@ cd proofwithquantumannealing/blockchain
 ### **2. Install Dependencies**
 ```bash
 # Using pip (recommended)
-pip install -r requirements/requirements.txt
+pip install -r requirements.txt
 
 # Or using conda
 conda create -n blockchain python=3.9
 conda activate blockchain
-pip install -r requirements/requirements.txt
+pip install -r requirements.txt
 ```
 
 ### **3. Generate Cryptographic Keys**

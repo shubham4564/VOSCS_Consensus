@@ -1,0 +1,26 @@
+# Core blockchain / networking
+cryptography==41.0.5
+p2pnetwork==1.2
+jsonpickle==3.0.2
+
+# Web API
+fastapi==0.104.1
+uvicorn==0.23.2
+starlette==0.27.0
+pydantic==2.11.7
+
+# Quantum annealing
+dimod==0.12.20
+dwave-samplers==1.6.0
+
+# HTTP / async
+aiohttp==3.12.14
+requests==2.32.4
+
+# Numerics / plotting
+numpy==1.26.4
+matplotlib==3.8.2
+
+# Observability
+psutil==7.0.0
+python-json-logger==2.0.7
