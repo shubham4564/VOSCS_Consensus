@@ -297,17 +297,20 @@ def main():
     """Main function with command line argument parsing"""
     base_port = 11000
     num_nodes = 5
-    
-    if len(sys.argv) > 1:
+
+    # Collect positional (non-flag) arguments
+    positional = [a for a in sys.argv[1:] if not a.startswith("-")]
+
+    if len(positional) > 0:
         try:
-            base_port = int(sys.argv[1])
+            base_port = int(positional[0])
         except ValueError:
             print("Error: base_port must be an integer")
             sys.exit(1)
-    
-    if len(sys.argv) > 2:
+
+    if len(positional) > 1:
         try:
-            num_nodes = int(sys.argv[2])
+            num_nodes = int(positional[1])
         except ValueError:
             print("Error: num_nodes must be an integer")
             sys.exit(1)
