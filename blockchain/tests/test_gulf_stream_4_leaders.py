@@ -7,7 +7,8 @@ Tests that Gulf Stream only forwards transactions to current leader + next 3 lea
 import sys
 import time
 import json
-sys.path.append('/Users/shubham/Documents/fromgithub/proofwithquantumannealing/blockchain/blockchain')
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'blockchain'))
 
 from blockchain import Blockchain
 from transaction.transaction import Transaction

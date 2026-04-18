@@ -223,7 +223,7 @@ def main():
         print(f"   Quantum metrics: curl http://localhost:{first_healthy}/api/v1/blockchain/quantum-metrics/")
     
     if checker.offline_nodes:
-        print(f"   Start nodes: python /Users/shubham/Documents/proofwithquantumannealing/blockchain/demos/start_nodes.py --count 5")
+        print(f"   Start nodes: ./start_nodes.sh 5")
     
     print(f"   Stop all: pkill -f 'run_node.py'")
     print(f"   Detailed check: python check_node_health.py --detailed")

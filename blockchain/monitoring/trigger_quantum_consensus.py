@@ -10,8 +10,8 @@ import sys
 import os
 
 # Add blockchain module to path
-sys.path.append('/Users/shubham/Documents/proofwithquantumannealing')
-sys.path.append('/Users/shubham/Documents/proofwithquantumannealing/blockchain')
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
 
 from blockchain.transaction.wallet import Wallet
 from blockchain.utils.helpers import BlockchainUtils
