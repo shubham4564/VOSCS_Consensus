@@ -49,7 +49,7 @@ import time
 from collections import Counter, defaultdict
 from contextlib import redirect_stdout as _redirect_stdout
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -77,7 +77,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # type: ignore
 
 from blockchain.quantum_consensus import QuantumAnnealingConsensus
-from blockchain.quantum_consensus.quantum_annealing_consensus import AblationConfig  # type: ignore
+from blockchain.quantum_consensus.quantum_annealing_consensus import AblationConfig, CommitteeSelectionResult  # type: ignore
+from blockchain.utils.result_layout import create_run_layout, write_run_metadata
+from tools.visualize_findings import generate_findings_bundle
 
 # Optional OR-Tools for ILP baseline
 try:
@@ -85,6 +87,14 @@ try:
     _ORTOOLS_AVAILABLE = True
 except ImportError:
     _ORTOOLS_AVAILABLE = False
+
+
+def _refresh_live_findings_dashboard(output_dir: str) -> None:
+    try:
+        result = generate_findings_bundle(search_root=output_dir, output_dir=output_dir)
+        print(f"  live findings dashboard refreshed: {result['live_dashboard_path']}")
+    except Exception as exc:
+        print(f"  warning: could not refresh live findings dashboard: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -109,6 +119,14 @@ class SimulationConfig:
     measurement_noise: float = 0.0           # multiplicative ±noise fraction
     # QUBO candidate cap
     max_candidate_nodes: int = 100
+    # Committee-selection rollout parameters
+    committee_k: int = 5
+    primary_leader_policy: str = "highest_score"
+    metadata_profile: str = "synthetic_static"
+    metadata_manifest: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    exact_oracle_max_candidates: int = 16
+    solver_study_candidate_sizes: List[int] = field(default_factory=lambda: [6, 8, 10, 12, 14, 16])
+    solver_study_seed_count: int = 5
 
 
 @dataclass
@@ -126,6 +144,43 @@ class StrategyMetrics:
     agreement_rate: float
     mean_solver_ms: float
     view_change_rate: float = 0.0  # HotStuff only
+    committee_size: int = 1
+    committee_constraint_violation_rate: float = 0.0
+    committee_mean_unique_failure_domain_ratio: float = 0.0
+    committee_attacker_seat_share: float = 0.0
+    committee_fallback_rate: float = 0.0
+    committee_objective_mean: float = 0.0
+    committee_raw_objective_mean: float = 0.0
+    committee_candidate_count_mean: float = 0.0
+
+
+@dataclass
+class SolverComparisonMetrics:
+    candidate_count: int
+    committee_k: int
+    n_trials: int
+    exact_objective_mean: float
+    quantum_objective_mean: float
+    greedy_objective_mean: float
+    weighted_objective_mean: float
+    quantum_optimality_gap_mean: float
+    greedy_optimality_gap_mean: float
+    weighted_optimality_gap_mean: float
+    quantum_disagreement_rate: float
+    greedy_disagreement_rate: float
+    weighted_disagreement_rate: float
+    quantum_solver_ms_mean: float
+    exact_solver_ms_mean: float
+    greedy_solver_ms_mean: float
+    weighted_solver_ms_mean: float
+
+
+@dataclass
+class CommitteeAblationDefinition:
+    strategy: str
+    ablation_config: Optional[AblationConfig]
+    cfg_overrides: Dict[str, Any] = field(default_factory=dict)
+    label: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -232,7 +287,45 @@ class NetworkSimulator:
 # Simulation environment builder
 # ---------------------------------------------------------------------------
 
-def _build_simulation_environment(cfg: SimulationConfig):
+def _synthesise_node_metadata(
+    cfg: SimulationConfig,
+    node_id: str,
+    node_index: int,
+    attacker: bool,
+) -> Dict[str, Any]:
+    """Return deterministic infrastructure metadata for committee-constraint experiments."""
+    if node_id in cfg.metadata_manifest:
+        return dict(cfg.metadata_manifest[node_id])
+
+    providers = ["aws", "gcp", "azure", "self_hosted"]
+    regions = ["us-west-2", "us-east-1", "eu-central-1", "ap-south-1"]
+    countries = ["US", "US", "DE", "IN"]
+    datacenter_codes = ["pdx1", "iad1", "fra1", "bom1"]
+
+    provider_idx = node_index % len(providers)
+    region_idx = (node_index // len(providers)) % len(regions)
+
+    if cfg.metadata_profile == "clustered_attackers" and attacker:
+        provider_idx = 0
+        region_idx = 1
+
+    metadata = {
+        "asn": 64512 + (provider_idx * 100) + region_idx,
+        "cloud_provider": providers[provider_idx],
+        "region": regions[region_idx],
+        "datacenter": datacenter_codes[region_idx],
+        "country_code": countries[region_idx],
+        "operator_id": f"{'attacker' if attacker else 'operator'}_{node_index % 8}",
+        "failure_domain": f"{providers[provider_idx]}:{regions[region_idx]}",
+        "metadata_source": "synthetic_manifest",
+    }
+    cfg.metadata_manifest[node_id] = metadata
+    return dict(metadata)
+
+def _build_simulation_environment(
+    cfg: SimulationConfig,
+    ablation_cfg: Optional[AblationConfig] = None,
+):
     """
     Initialise QuantumAnnealingConsensus and synthetic per-node attributes.
 
@@ -241,7 +334,11 @@ def _build_simulation_environment(cfg: SimulationConfig):
     """
     random.seed(cfg.seed)
 
-    consensus = QuantumAnnealingConsensus(initialize_genesis=False, verbose=False)
+    consensus = QuantumAnnealingConsensus(
+        initialize_genesis=False,
+        verbose=False,
+        ablation_config=ablation_cfg,
+    )
     consensus.max_candidate_nodes = cfg.max_candidate_nodes
 
     ground_truth: Dict[str, float] = {}
@@ -273,7 +370,13 @@ def _build_simulation_environment(cfg: SimulationConfig):
         online_prob[node_id] = min(0.98, 0.6 + 0.4 * capability)
 
         public_key, _ = consensus.ensure_node_keys(node_id)
-        consensus.register_node(node_id, public_key)
+        consensus.register_node(
+            node_id,
+            public_key,
+            metadata=_synthesise_node_metadata(cfg, node_id, i, attacker),
+        )
+        consensus.nodes[node_id]["stake_weight"] = stake[node_id]
+        consensus.nodes[node_id]["hash_power_weight"] = hash_power[node_id]
 
     return consensus, node_ids, ground_truth, stake, hash_power, online_prob, is_attacker
 
@@ -323,8 +426,16 @@ def _update_round_metrics(
 
             node_data["latency"] = base_latency
             node_data["throughput"] = base_tps
+            consensus.append_committee_observation(
+                node_id,
+                uptime_sample=1,
+                latency_sample=base_latency,
+                throughput_sample=base_tps,
+                anchor_id="leader",
+            )
         else:
             node_data["last_seen"] = now - (consensus.node_active_threshold + 10)
+            consensus.append_committee_observation(node_id, uptime_sample=0)
 
     consensus.node_performance_cache.clear()
     return online_state
@@ -366,9 +477,52 @@ def _apply_churn(
         is_attacker[new_id] = False
 
         pub_key, _ = consensus.ensure_node_keys(new_id)
-        consensus.register_node(new_id, pub_key)
+        consensus.register_node(
+            new_id,
+            pub_key,
+            metadata=_synthesise_node_metadata(cfg, new_id, idx + rng_seed, False),
+        )
 
         node_ids[idx] = new_id
+
+
+def _evaluate_committee_round(
+    consensus: QuantumAnnealingConsensus,
+    committee_nodes: List[str],
+    is_attacker: Dict[str, bool],
+) -> Dict[str, float]:
+    """Compute committee-level security and diversity signals for one round."""
+    if not committee_nodes:
+        return {
+            'has_constraint_violation': 1.0,
+            'unique_failure_domain_ratio': 0.0,
+            'attacker_seat_share': 0.0,
+        }
+
+    metadata = [
+        consensus.nodes.get(node_id, {}).get('committee_metadata', {})
+        for node_id in committee_nodes
+    ]
+    unique_failure_domains = {
+        entry.get('failure_domain', 'unknown')
+        for entry in metadata
+    }
+
+    has_conflict = 0.0
+    for i in range(len(metadata)):
+        for j in range(i + 1, len(metadata)):
+            if metadata[i].get('asn') == metadata[j].get('asn'):
+                has_conflict = 1.0
+                break
+        if has_conflict:
+            break
+
+    attacker_seat_share = sum(1 for node_id in committee_nodes if is_attacker.get(node_id, False)) / len(committee_nodes)
+    return {
+        'has_constraint_violation': has_conflict,
+        'unique_failure_domain_ratio': len(unique_failure_domains) / len(committee_nodes),
+        'attacker_seat_share': attacker_seat_share,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -400,6 +554,544 @@ def _select_quantum(
         selected = candidate_nodes[0]
 
     return selected, (time.perf_counter() - t0) * 1000.0
+
+
+def _select_committee_quantum(
+    consensus: QuantumAnnealingConsensus,
+    candidate_nodes: List[str],
+    vrf_output: str,
+    committee_k: int,
+    primary_leader_policy: str,
+):
+    """Committee QUBO strategy returning a structured committee result."""
+    import io
+
+    t0 = time.perf_counter()
+    if not candidate_nodes:
+        return consensus.select_committee(vrf_output, candidate_nodes=[], committee_k=committee_k)
+
+    _null = io.StringIO()
+    with _redirect_stdout(_null):
+        result = consensus.select_committee(
+            vrf_output,
+            candidate_nodes=candidate_nodes,
+            committee_k=committee_k,
+            primary_leader_policy=primary_leader_policy,
+        )
+
+    # Preserve the wall-clock harness timing rather than the inner solver-only timing.
+    result.solver_time_ms = (time.perf_counter() - t0) * 1000.0
+    return result
+
+
+def _serialize_pairwise_features(
+    candidate_nodes: List[str],
+    pairwise_features: Dict[Tuple[int, int], Dict[str, float]],
+) -> Dict[str, Dict[str, float]]:
+    """Convert indexed pairwise bundles into a JSON-friendly mapping."""
+    serializable_pairwise = {}
+    for (i, j), feature_bundle in pairwise_features.items():
+        serializable_pairwise[f"{candidate_nodes[i]}::{candidate_nodes[j]}"] = feature_bundle
+    return serializable_pairwise
+
+
+def _build_committee_result(
+    consensus: QuantumAnnealingConsensus,
+    candidate_nodes: List[str],
+    committee_nodes: List[str],
+    vrf_output: str,
+    committee_k: int,
+    primary_leader_policy: str,
+    *,
+    solver_time_ms: float,
+    used_fallback: bool,
+    raw_committee_nodes: Optional[List[str]] = None,
+    fallback_reason: Optional[str] = None,
+    selection_scores: Optional[Dict[str, float]] = None,
+    primary_leader: Optional[str] = None,
+) -> CommitteeSelectionResult:
+    """Build a structured committee result for non-QUBO baselines using the shared objective."""
+    (
+        _,
+        _,
+        _,
+        effective_scores,
+        pairwise_features,
+    ) = consensus.formulate_committee_qubo_problem(
+        vrf_output,
+        candidate_nodes,
+        committee_k=committee_k,
+    )
+    selected_scores = selection_scores or {
+        node_id: effective_scores[node_id]
+        for node_id in committee_nodes
+    }
+    if primary_leader is None:
+        primary_leader = consensus.derive_primary_leader(
+            committee_nodes,
+            vrf_output,
+            effective_scores=selected_scores,
+            policy=primary_leader_policy,
+        )
+
+    raw_nodes = list(raw_committee_nodes) if raw_committee_nodes is not None else list(committee_nodes)
+    objective_breakdown = consensus.evaluate_committee_selection(
+        vrf_output,
+        committee_nodes,
+        candidate_nodes=candidate_nodes,
+        committee_k=committee_k,
+        effective_scores=effective_scores,
+        pairwise_features=pairwise_features,
+    )
+    raw_objective_breakdown = consensus.evaluate_committee_selection(
+        vrf_output,
+        raw_nodes,
+        candidate_nodes=candidate_nodes,
+        committee_k=committee_k,
+        effective_scores=effective_scores,
+        pairwise_features=pairwise_features,
+    )
+
+    return CommitteeSelectionResult(
+        committee_nodes=list(committee_nodes),
+        primary_leader=primary_leader,
+        effective_scores={node_id: selected_scores.get(node_id, 0.0) for node_id in committee_nodes},
+        pairwise_features=_serialize_pairwise_features(candidate_nodes, pairwise_features),
+        solver_time_ms=solver_time_ms,
+        used_fallback=used_fallback,
+        candidate_count=len(candidate_nodes),
+        raw_committee_nodes=raw_nodes,
+        objective_value=objective_breakdown['total_objective'],
+        raw_objective_value=raw_objective_breakdown['total_objective'],
+        objective_breakdown=objective_breakdown,
+        raw_objective_breakdown=raw_objective_breakdown,
+        fallback_reason=fallback_reason,
+    )
+
+
+def _select_committee_greedy(
+    consensus: QuantumAnnealingConsensus,
+    candidate_nodes: List[str],
+    vrf_output: str,
+    committee_k: int,
+    primary_leader_policy: str,
+):
+    """Greedy score-only top-k committee baseline."""
+    t0 = time.perf_counter()
+    (
+        _,
+        _,
+        _,
+        effective_scores,
+        _,
+    ) = consensus.formulate_committee_qubo_problem(
+        vrf_output,
+        candidate_nodes,
+        committee_k=committee_k,
+    )
+    committee_nodes = sorted(
+        candidate_nodes,
+        key=lambda node_id: (effective_scores[node_id], node_id),
+        reverse=True,
+    )[:max(1, min(committee_k, len(candidate_nodes)))]
+    return _build_committee_result(
+        consensus,
+        candidate_nodes,
+        committee_nodes,
+        vrf_output,
+        committee_k,
+        primary_leader_policy,
+        solver_time_ms=(time.perf_counter() - t0) * 1000.0,
+        used_fallback=False,
+        selection_scores=effective_scores,
+    )
+
+
+def _select_committee_weighted(
+    consensus: QuantumAnnealingConsensus,
+    candidate_nodes: List[str],
+    vrf_output: str,
+    committee_k: int,
+    primary_leader_policy: str,
+) -> CommitteeSelectionResult:
+    """Weighted committee baseline using suitability scores without exact optimization."""
+    t0 = time.perf_counter()
+    (
+        _,
+        _,
+        _,
+        effective_scores,
+        _,
+    ) = consensus.formulate_committee_qubo_problem(
+        vrf_output,
+        candidate_nodes,
+        committee_k=committee_k,
+    )
+
+    rng = random.Random(vrf_output)
+    remaining_nodes = list(candidate_nodes)
+    committee_nodes: List[str] = []
+    target_size = max(1, min(committee_k, len(remaining_nodes)))
+
+    while remaining_nodes and len(committee_nodes) < target_size:
+        weights = [max(0.001, effective_scores[node_id]) for node_id in remaining_nodes]
+        total_weight = sum(weights)
+        draw = rng.random() * total_weight
+        cumulative = 0.0
+        selected_node = remaining_nodes[-1]
+        for index, weight in enumerate(weights):
+            cumulative += weight
+            if draw <= cumulative:
+                selected_node = remaining_nodes[index]
+                break
+        committee_nodes.append(selected_node)
+        remaining_nodes.remove(selected_node)
+
+    return _build_committee_result(
+        consensus,
+        candidate_nodes,
+        committee_nodes,
+        vrf_output,
+        committee_k,
+        primary_leader_policy,
+        solver_time_ms=(time.perf_counter() - t0) * 1000.0,
+        used_fallback=False,
+        selection_scores=effective_scores,
+    )
+
+
+def _select_committee_exact(
+    consensus: QuantumAnnealingConsensus,
+    candidate_nodes: List[str],
+    vrf_output: str,
+    committee_k: int,
+    primary_leader_policy: str,
+    max_exact_candidates: int,
+) -> CommitteeSelectionResult:
+    """Small-candidate exact committee oracle baseline."""
+    import io
+
+    t0 = time.perf_counter()
+    _null = io.StringIO()
+    with _redirect_stdout(_null):
+        result = consensus.select_committee_exact(
+            vrf_output,
+            candidate_nodes=candidate_nodes,
+            committee_k=committee_k,
+            primary_leader_policy=primary_leader_policy,
+            max_exact_candidates=max_exact_candidates,
+        )
+
+    result.solver_time_ms = (time.perf_counter() - t0) * 1000.0
+    return result
+
+
+def _normalize_positive(value: float, min_val: float, max_val: float) -> float:
+    if max_val == min_val:
+        return 1.0
+    return (value - min_val) / (max_val - min_val)
+
+
+def _normalize_negative(value: float, min_val: float, max_val: float) -> float:
+    if max_val == min_val:
+        return 1.0
+    return (max_val - value) / (max_val - min_val)
+
+
+def _build_candidate_metric_view(
+    consensus: QuantumAnnealingConsensus,
+    candidate_nodes: List[str],
+) -> Dict[str, Dict[str, float]]:
+    """Return normalized candidate metrics for baseline selectors."""
+    if not candidate_nodes:
+        return {}
+
+    uptimes = {node_id: consensus.calculate_uptime(node_id) for node_id in candidate_nodes}
+    throughputs = {
+        node_id: consensus.nodes.get(node_id, {}).get("throughput", 0.0)
+        for node_id in candidate_nodes
+    }
+    past_performance = {
+        node_id: (
+            consensus.nodes.get(node_id, {}).get("proposal_success_count", 0)
+            - 2 * consensus.nodes.get(node_id, {}).get("proposal_failure_count", 0)
+        )
+        for node_id in candidate_nodes
+    }
+
+    valid_latencies = [
+        consensus.nodes.get(node_id, {}).get("latency", float("inf"))
+        for node_id in candidate_nodes
+        if consensus.nodes.get(node_id, {}).get("latency", float("inf")) != float("inf")
+    ]
+    fallback_latency = max(valid_latencies) if valid_latencies else 1.0
+    latencies = {
+        node_id: (
+            consensus.nodes.get(node_id, {}).get("latency", float("inf"))
+            if consensus.nodes.get(node_id, {}).get("latency", float("inf")) != float("inf")
+            else fallback_latency
+        )
+        for node_id in candidate_nodes
+    }
+
+    min_uptime, max_uptime = min(uptimes.values()), max(uptimes.values())
+    min_latency, max_latency = min(latencies.values()), max(latencies.values())
+    min_throughput, max_throughput = min(throughputs.values()), max(throughputs.values())
+    min_past, max_past = min(past_performance.values()), max(past_performance.values())
+
+    return {
+        node_id: {
+            "uptime": _normalize_positive(uptimes[node_id], min_uptime, max_uptime),
+            "latency": _normalize_negative(latencies[node_id], min_latency, max_latency),
+            "throughput": _normalize_positive(
+                throughputs[node_id],
+                min_throughput,
+                max_throughput,
+            ),
+            "past_performance": _normalize_positive(
+                past_performance[node_id],
+                min_past,
+                max_past,
+            ),
+            "selection_frequency": consensus.calculate_selection_frequency(node_id),
+            "stake_weight": consensus.nodes.get(node_id, {}).get("stake_weight", 1.0),
+        }
+        for node_id in candidate_nodes
+    }
+
+
+def _history_only_scores(
+    consensus: QuantumAnnealingConsensus,
+    candidate_nodes: List[str],
+) -> Dict[str, float]:
+    metric_view = _build_candidate_metric_view(consensus, candidate_nodes)
+    return {
+        node_id: 0.65 * metrics["past_performance"] + 0.35 * metrics["uptime"]
+        for node_id, metrics in metric_view.items()
+    }
+
+
+def _composite_committee_scores(
+    consensus: QuantumAnnealingConsensus,
+    candidate_nodes: List[str],
+) -> Dict[str, float]:
+    metric_view = _build_candidate_metric_view(consensus, candidate_nodes)
+    return {
+        node_id: 0.25 * (
+            metrics["uptime"]
+            + metrics["latency"]
+            + metrics["throughput"]
+            + metrics["past_performance"]
+        )
+        for node_id, metrics in metric_view.items()
+    }
+
+
+def _fairness_only_scores(
+    consensus: QuantumAnnealingConsensus,
+    candidate_nodes: List[str],
+) -> Dict[str, float]:
+    metric_view = _build_candidate_metric_view(consensus, candidate_nodes)
+    return {
+        node_id: max(0.0, 1.0 - metrics["selection_frequency"])
+        for node_id, metrics in metric_view.items()
+    }
+
+
+def _vrf_stake_scores(
+    consensus: QuantumAnnealingConsensus,
+    candidate_nodes: List[str],
+    vrf_output: str,
+) -> Dict[str, float]:
+    scores: Dict[str, float] = {}
+    for node_id in candidate_nodes:
+        vrf_bytes = hmac.new(vrf_output.encode(), node_id.encode(), hashlib.sha256).digest()
+        vrf_score = int.from_bytes(vrf_bytes[:4], "big") / 0xFFFF_FFFF
+        stake_weight = consensus.nodes.get(node_id, {}).get("stake_weight", 1.0)
+        scores[node_id] = max(0.001, stake_weight * vrf_score)
+    return scores
+
+
+def _weighted_sample_without_replacement(
+    items: List[str],
+    score_lookup: Dict[str, float],
+    target_size: int,
+    rng: random.Random,
+) -> List[str]:
+    remaining_items = list(items)
+    selected_items: List[str] = []
+
+    while remaining_items and len(selected_items) < target_size:
+        weights = [max(0.001, score_lookup.get(item, 0.0)) for item in remaining_items]
+        total_weight = sum(weights)
+        draw = rng.random() * total_weight
+        cumulative = 0.0
+        selected_item = remaining_items[-1]
+        for index, weight in enumerate(weights):
+            cumulative += weight
+            if draw <= cumulative:
+                selected_item = remaining_items[index]
+                break
+        selected_items.append(selected_item)
+        remaining_items.remove(selected_item)
+
+    return selected_items
+
+
+def _select_committee_uniform(
+    consensus: QuantumAnnealingConsensus,
+    candidate_nodes: List[str],
+    vrf_output: str,
+    committee_k: int,
+    primary_leader_policy: str,
+) -> CommitteeSelectionResult:
+    """Uniform exact-k committee lottery."""
+    t0 = time.perf_counter()
+    if not candidate_nodes:
+        return _build_committee_result(
+            consensus,
+            candidate_nodes,
+            [],
+            vrf_output,
+            committee_k,
+            primary_leader_policy,
+            solver_time_ms=(time.perf_counter() - t0) * 1000.0,
+            used_fallback=False,
+        )
+
+    target_size = max(1, min(committee_k, len(candidate_nodes)))
+    rng = random.Random(vrf_output)
+    committee_nodes = rng.sample(sorted(candidate_nodes), target_size)
+    primary_leader = min(
+        committee_nodes,
+        key=lambda node_id: hashlib.sha256(f"{vrf_output}:{node_id}".encode()).hexdigest(),
+    )
+    return _build_committee_result(
+        consensus,
+        candidate_nodes,
+        committee_nodes,
+        vrf_output,
+        committee_k,
+        primary_leader_policy,
+        solver_time_ms=(time.perf_counter() - t0) * 1000.0,
+        used_fallback=False,
+        selection_scores={node_id: 1.0 for node_id in committee_nodes},
+        primary_leader=primary_leader,
+    )
+
+
+def _select_committee_vrf_stake(
+    consensus: QuantumAnnealingConsensus,
+    candidate_nodes: List[str],
+    vrf_output: str,
+    committee_k: int,
+    primary_leader_policy: str,
+) -> CommitteeSelectionResult:
+    """Stake-weighted VRF committee sortition baseline."""
+    t0 = time.perf_counter()
+    target_size = max(1, min(committee_k, len(candidate_nodes)))
+    score_lookup = _vrf_stake_scores(consensus, candidate_nodes, vrf_output)
+    committee_nodes = _weighted_sample_without_replacement(
+        candidate_nodes,
+        score_lookup,
+        target_size,
+        random.Random(vrf_output),
+    )
+    return _build_committee_result(
+        consensus,
+        candidate_nodes,
+        committee_nodes,
+        vrf_output,
+        committee_k,
+        primary_leader_policy,
+        solver_time_ms=(time.perf_counter() - t0) * 1000.0,
+        used_fallback=False,
+        selection_scores=score_lookup,
+    )
+
+
+def _select_committee_reputation(
+    consensus: QuantumAnnealingConsensus,
+    candidate_nodes: List[str],
+    vrf_output: str,
+    committee_k: int,
+    primary_leader_policy: str,
+) -> CommitteeSelectionResult:
+    """History-dominant reputation committee baseline."""
+    t0 = time.perf_counter()
+    score_lookup = _history_only_scores(consensus, candidate_nodes)
+    committee_nodes = sorted(
+        candidate_nodes,
+        key=lambda node_id: (score_lookup.get(node_id, 0.0), node_id),
+        reverse=True,
+    )[:max(1, min(committee_k, len(candidate_nodes)))]
+    return _build_committee_result(
+        consensus,
+        candidate_nodes,
+        committee_nodes,
+        vrf_output,
+        committee_k,
+        primary_leader_policy,
+        solver_time_ms=(time.perf_counter() - t0) * 1000.0,
+        used_fallback=False,
+        selection_scores=score_lookup,
+    )
+
+
+def _select_committee_composite_greedy(
+    consensus: QuantumAnnealingConsensus,
+    candidate_nodes: List[str],
+    vrf_output: str,
+    committee_k: int,
+    primary_leader_policy: str,
+) -> CommitteeSelectionResult:
+    """Multi-factor greedy committee baseline with no pairwise optimization."""
+    t0 = time.perf_counter()
+    score_lookup = _composite_committee_scores(consensus, candidate_nodes)
+    committee_nodes = sorted(
+        candidate_nodes,
+        key=lambda node_id: (score_lookup.get(node_id, 0.0), node_id),
+        reverse=True,
+    )[:max(1, min(committee_k, len(candidate_nodes)))]
+    return _build_committee_result(
+        consensus,
+        candidate_nodes,
+        committee_nodes,
+        vrf_output,
+        committee_k,
+        primary_leader_policy,
+        solver_time_ms=(time.perf_counter() - t0) * 1000.0,
+        used_fallback=False,
+        selection_scores=score_lookup,
+    )
+
+
+def _select_committee_fairness_only(
+    consensus: QuantumAnnealingConsensus,
+    candidate_nodes: List[str],
+    vrf_output: str,
+    committee_k: int,
+    primary_leader_policy: str,
+) -> CommitteeSelectionResult:
+    """Anti-concentration-only committee baseline."""
+    t0 = time.perf_counter()
+    score_lookup = _fairness_only_scores(consensus, candidate_nodes)
+    committee_nodes = sorted(
+        candidate_nodes,
+        key=lambda node_id: (score_lookup.get(node_id, 0.0), node_id),
+        reverse=True,
+    )[:max(1, min(committee_k, len(candidate_nodes)))]
+    return _build_committee_result(
+        consensus,
+        candidate_nodes,
+        committee_nodes,
+        vrf_output,
+        committee_k,
+        primary_leader_policy,
+        solver_time_ms=(time.perf_counter() - t0) * 1000.0,
+        used_fallback=False,
+        selection_scores=score_lookup,
+    )
 
 
 def _select_exact_argmax(
@@ -615,6 +1307,61 @@ def _select_pow_hash(
     return selected, (time.perf_counter() - t0) * 1000.0
 
 
+def _strategy_correlation_signal(
+    consensus: QuantumAnnealingConsensus,
+    strategy: str,
+    node_ids: List[str],
+) -> Dict[str, float]:
+    """Return the baseline-specific signal used for score-selection correlation."""
+    if not node_ids:
+        return {}
+
+    if strategy in {
+        "quantum",
+        "exact_argmax",
+        "exact_ilp",
+        "weighted_score",
+        "committee_quantum",
+        "committee_greedy",
+        "committee_weighted",
+        "committee_exact",
+    }:
+        return {node_id: consensus.calculate_suitability_score(node_id) for node_id in node_ids}
+
+    if strategy in {"vrf_weighted", "pos_stake", "committee_vrf_stake"}:
+        return {
+            node_id: consensus.nodes.get(node_id, {}).get("stake_weight", 1.0)
+            for node_id in node_ids
+        }
+
+    if strategy == "pow_hash":
+        return {
+            node_id: consensus.nodes.get(node_id, {}).get("hash_power_weight", 1.0)
+            for node_id in node_ids
+        }
+
+    if strategy == "greedy_score":
+        now = time.time()
+        return {
+            node_id: -max(0.0, now - consensus.nodes.get(node_id, {}).get("last_seen", 0.0))
+            for node_id in node_ids
+        }
+
+    if strategy == "committee_reputation":
+        return _history_only_scores(consensus, node_ids)
+
+    if strategy == "committee_composite_greedy":
+        return _composite_committee_scores(consensus, node_ids)
+
+    if strategy == "committee_fairness_only":
+        return _fairness_only_scores(consensus, node_ids)
+
+    if strategy in {"round_robin", "hotstuff_rr", "committee_uniform"}:
+        return {}
+
+    return {node_id: consensus.calculate_suitability_score(node_id) for node_id in node_ids}
+
+
 # ---------------------------------------------------------------------------
 # Agreement rate helper
 # ---------------------------------------------------------------------------
@@ -641,6 +1388,205 @@ def _compute_agreement_rate(
     return selections.count(most_common) / n_virtual
 
 
+def _prepare_solver_study_candidates(
+    cfg: SimulationConfig,
+    study_seed: int,
+) -> Tuple[QuantumAnnealingConsensus, List[str]]:
+    """Build a deterministic small-candidate committee environment for solver-quality comparisons."""
+    study_cfg = SimulationConfig(
+        num_nodes=cfg.num_nodes,
+        num_rounds=1,
+        attacker_fraction=cfg.attacker_fraction,
+        top_k_for_error=cfg.top_k_for_error,
+        seed=study_seed,
+        output_dir=cfg.output_dir,
+        network_delay_model=cfg.network_delay_model,
+        network_delay_mean_ms=cfg.network_delay_mean_ms,
+        network_delay_sigma=cfg.network_delay_sigma,
+        churn_rate=cfg.churn_rate,
+        measurement_noise=cfg.measurement_noise,
+        max_candidate_nodes=cfg.max_candidate_nodes,
+        committee_k=cfg.committee_k,
+        primary_leader_policy=cfg.primary_leader_policy,
+        metadata_profile=cfg.metadata_profile,
+        metadata_manifest={},
+        exact_oracle_max_candidates=cfg.exact_oracle_max_candidates,
+        solver_study_candidate_sizes=list(cfg.solver_study_candidate_sizes),
+        solver_study_seed_count=cfg.solver_study_seed_count,
+    )
+    (
+        consensus,
+        node_ids,
+        ground_truth,
+        _stake,
+        _hash_power,
+        _online_prob,
+        _is_attacker,
+    ) = _build_simulation_environment(study_cfg)
+
+    rng = random.Random(study_seed)
+    now = time.time()
+    for node_id in node_ids:
+        capability = ground_truth[node_id]
+        node_state = consensus.nodes[node_id]
+        latency = max(0.001, 0.15 - 0.10 * capability + rng.uniform(-0.01, 0.01))
+        throughput = max(1.0, 5.0 + 45.0 * capability * rng.uniform(0.8, 1.2))
+        node_state['last_seen'] = now
+        node_state['latency'] = latency
+        node_state['throughput'] = throughput
+        consensus.append_committee_observation(
+            node_id,
+            uptime_sample=1,
+            latency_sample=latency,
+            throughput_sample=throughput,
+            anchor_id='solver_quality',
+        )
+
+    consensus.node_performance_cache.clear()
+    return consensus, node_ids
+
+
+def run_solver_comparison_study(
+    cfg: SimulationConfig,
+    candidate_sizes: Optional[List[int]] = None,
+    seed_count: Optional[int] = None,
+) -> List[SolverComparisonMetrics]:
+    """Compare committee_quantum against an exact oracle and lightweight baselines on small candidate sets."""
+    chosen_sizes = candidate_sizes or list(cfg.solver_study_candidate_sizes)
+    trials = seed_count or cfg.solver_study_seed_count
+    results: List[SolverComparisonMetrics] = []
+
+    for candidate_count in chosen_sizes:
+        if candidate_count > cfg.exact_oracle_max_candidates:
+            raise ValueError(
+                f"candidate size {candidate_count} exceeds exact oracle limit {cfg.exact_oracle_max_candidates}"
+            )
+
+        committee_k = max(1, min(cfg.committee_k, candidate_count))
+        exact_objectives: List[float] = []
+        quantum_objectives: List[float] = []
+        greedy_objectives: List[float] = []
+        weighted_objectives: List[float] = []
+        quantum_gaps: List[float] = []
+        greedy_gaps: List[float] = []
+        weighted_gaps: List[float] = []
+        quantum_solver_ms: List[float] = []
+        exact_solver_ms: List[float] = []
+        greedy_solver_ms: List[float] = []
+        weighted_solver_ms: List[float] = []
+        quantum_disagreements = 0
+        greedy_disagreements = 0
+        weighted_disagreements = 0
+
+        print(f"\n{'=' * 60}")
+        print(f"  Solver study: M={candidate_count}, k={committee_k}, trials={trials}")
+        print(f"{'=' * 60}")
+
+        for trial_index in range(trials):
+            study_seed = cfg.seed + trial_index
+            study_cfg = SimulationConfig(
+                num_nodes=candidate_count,
+                num_rounds=1,
+                attacker_fraction=cfg.attacker_fraction,
+                top_k_for_error=cfg.top_k_for_error,
+                seed=study_seed,
+                output_dir=cfg.output_dir,
+                network_delay_model=cfg.network_delay_model,
+                network_delay_mean_ms=cfg.network_delay_mean_ms,
+                network_delay_sigma=cfg.network_delay_sigma,
+                churn_rate=cfg.churn_rate,
+                measurement_noise=cfg.measurement_noise,
+                max_candidate_nodes=cfg.max_candidate_nodes,
+                committee_k=committee_k,
+                primary_leader_policy=cfg.primary_leader_policy,
+                metadata_profile=cfg.metadata_profile,
+                metadata_manifest={},
+                exact_oracle_max_candidates=cfg.exact_oracle_max_candidates,
+                solver_study_candidate_sizes=list(cfg.solver_study_candidate_sizes),
+                solver_study_seed_count=cfg.solver_study_seed_count,
+            )
+            consensus, node_ids = _prepare_solver_study_candidates(study_cfg, study_seed)
+            vrf_output = hashlib.sha256(f"solver_study_{candidate_count}_{study_seed}".encode()).hexdigest()
+
+            exact_result = consensus.select_committee_exact(
+                vrf_output,
+                candidate_nodes=node_ids,
+                committee_k=committee_k,
+                primary_leader_policy=cfg.primary_leader_policy,
+                max_exact_candidates=cfg.exact_oracle_max_candidates,
+            )
+            quantum_result = _select_committee_quantum(
+                consensus,
+                node_ids,
+                vrf_output,
+                committee_k,
+                cfg.primary_leader_policy,
+            )
+            greedy_result = _select_committee_greedy(
+                consensus,
+                node_ids,
+                vrf_output,
+                committee_k,
+                cfg.primary_leader_policy,
+            )
+            weighted_result = _select_committee_weighted(
+                consensus,
+                node_ids,
+                vrf_output,
+                committee_k,
+                cfg.primary_leader_policy,
+            )
+
+            exact_objectives.append(exact_result.objective_value)
+            quantum_objectives.append(quantum_result.objective_value)
+            greedy_objectives.append(greedy_result.objective_value)
+            weighted_objectives.append(weighted_result.objective_value)
+
+            quantum_gaps.append(max(0.0, quantum_result.objective_value - exact_result.objective_value))
+            greedy_gaps.append(max(0.0, greedy_result.objective_value - exact_result.objective_value))
+            weighted_gaps.append(max(0.0, weighted_result.objective_value - exact_result.objective_value))
+
+            exact_solver_ms.append(exact_result.solver_time_ms)
+            quantum_solver_ms.append(quantum_result.solver_time_ms)
+            greedy_solver_ms.append(greedy_result.solver_time_ms)
+            weighted_solver_ms.append(weighted_result.solver_time_ms)
+
+            exact_committee = set(exact_result.committee_nodes)
+            if set(quantum_result.committee_nodes) != exact_committee:
+                quantum_disagreements += 1
+            if set(greedy_result.committee_nodes) != exact_committee:
+                greedy_disagreements += 1
+            if set(weighted_result.committee_nodes) != exact_committee:
+                weighted_disagreements += 1
+
+        result = SolverComparisonMetrics(
+            candidate_count=candidate_count,
+            committee_k=committee_k,
+            n_trials=trials,
+            exact_objective_mean=statistics.mean(exact_objectives),
+            quantum_objective_mean=statistics.mean(quantum_objectives),
+            greedy_objective_mean=statistics.mean(greedy_objectives),
+            weighted_objective_mean=statistics.mean(weighted_objectives),
+            quantum_optimality_gap_mean=statistics.mean(quantum_gaps),
+            greedy_optimality_gap_mean=statistics.mean(greedy_gaps),
+            weighted_optimality_gap_mean=statistics.mean(weighted_gaps),
+            quantum_disagreement_rate=quantum_disagreements / trials,
+            greedy_disagreement_rate=greedy_disagreements / trials,
+            weighted_disagreement_rate=weighted_disagreements / trials,
+            quantum_solver_ms_mean=statistics.mean(quantum_solver_ms),
+            exact_solver_ms_mean=statistics.mean(exact_solver_ms),
+            greedy_solver_ms_mean=statistics.mean(greedy_solver_ms),
+            weighted_solver_ms_mean=statistics.mean(weighted_solver_ms),
+        )
+        results.append(result)
+        print(
+            f"  exact_obj={result.exact_objective_mean:.3f}  quantum_gap={result.quantum_optimality_gap_mean:.3f}  "
+            f"greedy_gap={result.greedy_optimality_gap_mean:.3f}  weighted_gap={result.weighted_optimality_gap_mean:.3f}"
+        )
+
+    return results
+
+
 # ---------------------------------------------------------------------------
 # Main simulation loop
 # ---------------------------------------------------------------------------
@@ -656,46 +1602,23 @@ def run_simulation(
 
     strategy must be one of:
       quantum | exact_argmax | exact_ilp | vrf_weighted | hotstuff_rr |
-      greedy_score | weighted_score | round_robin | pos_stake | pow_hash
+            greedy_score | weighted_score | round_robin | pos_stake | pow_hash |
+            committee_quantum | committee_greedy | committee_uniform |
+            committee_vrf_stake | committee_reputation |
+            committee_composite_greedy | committee_fairness_only |
+            committee_weighted | committee_exact
     """
     random.seed(cfg.seed)
 
-    consensus = QuantumAnnealingConsensus(
-        initialize_genesis=False,
-        verbose=False,
-        ablation_config=ablation_cfg,
-    )
-    consensus.max_candidate_nodes = cfg.max_candidate_nodes
-
-    # Build synthetic nodes
-    rng = random.Random(cfg.seed)
-    ground_truth: Dict[str, float] = {}
-    stake: Dict[str, float] = {}
-    hash_power: Dict[str, float] = {}
-    online_prob: Dict[str, float] = {}
-    is_attacker: Dict[str, bool] = {}
-    node_ids: List[str] = []
-
-    num_attackers = max(1, int(cfg.num_nodes * cfg.attacker_fraction))
-    attacker_ids = {f"node_{i}" for i in range(num_attackers)}
-
-    for i in range(cfg.num_nodes):
-        node_id = f"node_{i}"
-        node_ids.append(node_id)
-        attacker = node_id in attacker_ids
-        base_cap = rng.uniform(0.3, 1.0)
-        cap = (
-            max(0.1, base_cap - rng.uniform(0.2, 0.5))
-            if attacker
-            else min(1.0, base_cap + rng.uniform(0.0, 0.2))
-        )
-        ground_truth[node_id] = cap
-        is_attacker[node_id] = attacker
-        stake[node_id] = max(0.1, cap * rng.uniform(5.0, 15.0))
-        hash_power[node_id] = max(0.1, cap * rng.uniform(8.0, 20.0))
-        online_prob[node_id] = min(0.98, 0.6 + 0.4 * cap)
-        pub_key, _ = consensus.ensure_node_keys(node_id)
-        consensus.register_node(node_id, pub_key)
+    (
+        consensus,
+        node_ids,
+        ground_truth,
+        stake,
+        hash_power,
+        online_prob,
+        is_attacker,
+    ) = _build_simulation_environment(cfg, ablation_cfg=ablation_cfg)
 
     net_sim = NetworkSimulator(
         model=cfg.network_delay_model,
@@ -719,6 +1642,13 @@ def run_simulation(
     solver_times_ms: List[float] = []
     view_changes: int = 0
     agreement_scores: List[float] = []
+    committee_constraint_violations: List[float] = []
+    committee_unique_failure_ratios: List[float] = []
+    committee_attacker_seat_shares: List[float] = []
+    committee_fallbacks: int = 0
+    committee_objective_values: List[float] = []
+    committee_raw_objective_values: List[float] = []
+    committee_candidate_counts: List[float] = []
 
     if verbose:
         print(f"  Running {cfg.num_rounds} rounds with strategy={strategy}, N={cfg.num_nodes}")
@@ -747,6 +1677,7 @@ def run_simulation(
         selected: Optional[str] = None
         solver_ms: float = 0.0
         view_changed: bool = False
+        committee_nodes: List[str] = []
 
         t_block_start = time.perf_counter()
 
@@ -770,6 +1701,108 @@ def run_simulation(
             selected, solver_ms = _select_pos_stake(active_nodes, stake)
         elif strategy == "pow_hash":
             selected, solver_ms = _select_pow_hash(active_nodes, hash_power)
+        elif strategy == "committee_quantum":
+            committee_result = _select_committee_quantum(
+                consensus,
+                active_nodes,
+                vrf_output,
+                cfg.committee_k,
+                cfg.primary_leader_policy,
+            )
+            selected = committee_result.primary_leader
+            solver_ms = committee_result.solver_time_ms
+            committee_nodes = committee_result.committee_nodes
+            if committee_result.used_fallback:
+                committee_fallbacks += 1
+        elif strategy == "committee_greedy":
+            committee_result = _select_committee_greedy(
+                consensus,
+                active_nodes,
+                vrf_output,
+                cfg.committee_k,
+                cfg.primary_leader_policy,
+            )
+            selected = committee_result.primary_leader
+            solver_ms = committee_result.solver_time_ms
+            committee_nodes = committee_result.committee_nodes
+        elif strategy == "committee_weighted":
+            committee_result = _select_committee_weighted(
+                consensus,
+                active_nodes,
+                vrf_output,
+                cfg.committee_k,
+                cfg.primary_leader_policy,
+            )
+            selected = committee_result.primary_leader
+            solver_ms = committee_result.solver_time_ms
+            committee_nodes = committee_result.committee_nodes
+        elif strategy == "committee_uniform":
+            committee_result = _select_committee_uniform(
+                consensus,
+                active_nodes,
+                vrf_output,
+                cfg.committee_k,
+                cfg.primary_leader_policy,
+            )
+            selected = committee_result.primary_leader
+            solver_ms = committee_result.solver_time_ms
+            committee_nodes = committee_result.committee_nodes
+        elif strategy == "committee_vrf_stake":
+            committee_result = _select_committee_vrf_stake(
+                consensus,
+                active_nodes,
+                vrf_output,
+                cfg.committee_k,
+                cfg.primary_leader_policy,
+            )
+            selected = committee_result.primary_leader
+            solver_ms = committee_result.solver_time_ms
+            committee_nodes = committee_result.committee_nodes
+        elif strategy == "committee_reputation":
+            committee_result = _select_committee_reputation(
+                consensus,
+                active_nodes,
+                vrf_output,
+                cfg.committee_k,
+                cfg.primary_leader_policy,
+            )
+            selected = committee_result.primary_leader
+            solver_ms = committee_result.solver_time_ms
+            committee_nodes = committee_result.committee_nodes
+        elif strategy == "committee_composite_greedy":
+            committee_result = _select_committee_composite_greedy(
+                consensus,
+                active_nodes,
+                vrf_output,
+                cfg.committee_k,
+                cfg.primary_leader_policy,
+            )
+            selected = committee_result.primary_leader
+            solver_ms = committee_result.solver_time_ms
+            committee_nodes = committee_result.committee_nodes
+        elif strategy == "committee_fairness_only":
+            committee_result = _select_committee_fairness_only(
+                consensus,
+                active_nodes,
+                vrf_output,
+                cfg.committee_k,
+                cfg.primary_leader_policy,
+            )
+            selected = committee_result.primary_leader
+            solver_ms = committee_result.solver_time_ms
+            committee_nodes = committee_result.committee_nodes
+        elif strategy == "committee_exact":
+            committee_result = _select_committee_exact(
+                consensus,
+                active_nodes,
+                vrf_output,
+                cfg.committee_k,
+                cfg.primary_leader_policy,
+                cfg.exact_oracle_max_candidates,
+            )
+            selected = committee_result.primary_leader
+            solver_ms = committee_result.solver_time_ms
+            committee_nodes = committee_result.committee_nodes
         else:
             raise ValueError(f"Unknown strategy: {strategy!r}")
 
@@ -802,10 +1835,21 @@ def run_simulation(
         # Solver time
         solver_times_ms.append(solver_ms)
 
+        if committee_nodes:
+            committee_round = _evaluate_committee_round(consensus, committee_nodes, is_attacker)
+            committee_constraint_violations.append(committee_round['has_constraint_violation'])
+            committee_unique_failure_ratios.append(committee_round['unique_failure_domain_ratio'])
+            committee_attacker_seat_shares.append(committee_round['attacker_seat_share'])
+            committee_objective_values.append(committee_result.objective_value)
+            committee_raw_objective_values.append(committee_result.raw_objective_value)
+            committee_candidate_counts.append(float(committee_result.candidate_count))
+
         # Agreement rate (sampled every 50 rounds for performance)
         if strategy in ("quantum", "exact_argmax", "exact_ilp") and rnd % 50 == 0:
             agr = _compute_agreement_rate(consensus, active_nodes[:20], vrf_output)
             agreement_scores.append(agr)
+        elif strategy == "committee_quantum" and rnd % 50 == 0 and committee_nodes:
+            agreement_scores.append(1.0)
 
     # --- Aggregate metrics ---
     total_valid = cfg.num_rounds - missed_slots
@@ -827,12 +1871,32 @@ def run_simulation(
     # Score-to-selection Spearman correlation
     node_list = list(selection_counts.keys()) if selection_counts else node_ids[:10]
     vrf_last = hashlib.sha256(f"final_{cfg.seed}".encode()).hexdigest()
-    score_list = [consensus.calculate_suitability_score(n) for n in node_list]
-    count_list = [selection_counts.get(n, 0) for n in node_list]
-    spearman = _spearman_correlation(score_list, count_list)
+    correlation_signal = _strategy_correlation_signal(consensus, strategy, node_list)
+    if correlation_signal:
+        score_list = [correlation_signal.get(n, 0.0) for n in node_list]
+        count_list = [selection_counts.get(n, 0) for n in node_list]
+        spearman = _spearman_correlation(score_list, count_list)
+    else:
+        spearman = 0.0
 
     agreement_rate = statistics.mean(agreement_scores) if agreement_scores else 1.0
     view_change_rate = view_changes / total_valid if strategy == "hotstuff_rr" else 0.0
+    committee_size = cfg.committee_k if strategy.startswith("committee_") else 1
+    committee_constraint_violation_rate = (
+        statistics.mean(committee_constraint_violations) if committee_constraint_violations else 0.0
+    )
+    committee_mean_unique_failure_domain_ratio = (
+        statistics.mean(committee_unique_failure_ratios) if committee_unique_failure_ratios else 0.0
+    )
+    committee_attacker_seat_share = (
+        statistics.mean(committee_attacker_seat_shares) if committee_attacker_seat_shares else 0.0
+    )
+    committee_fallback_rate = (
+        committee_fallbacks / total_valid if strategy == "committee_quantum" and total_valid > 0 else 0.0
+    )
+    committee_objective_mean = statistics.mean(committee_objective_values) if committee_objective_values else 0.0
+    committee_raw_objective_mean = statistics.mean(committee_raw_objective_values) if committee_raw_objective_values else 0.0
+    committee_candidate_count_mean = statistics.mean(committee_candidate_counts) if committee_candidate_counts else 0.0
 
     return StrategyMetrics(
         name=strategy,
@@ -848,6 +1912,14 @@ def run_simulation(
         agreement_rate=agreement_rate,
         mean_solver_ms=mean_solver_ms,
         view_change_rate=view_change_rate,
+        committee_size=committee_size,
+        committee_constraint_violation_rate=committee_constraint_violation_rate,
+        committee_mean_unique_failure_domain_ratio=committee_mean_unique_failure_domain_ratio,
+        committee_attacker_seat_share=committee_attacker_seat_share,
+        committee_fallback_rate=committee_fallback_rate,
+        committee_objective_mean=committee_objective_mean,
+        committee_raw_objective_mean=committee_raw_objective_mean,
+        committee_candidate_count_mean=committee_candidate_count_mean,
     )
 
 
@@ -866,7 +1938,77 @@ ALL_STRATEGIES = [
     "round_robin",
     "pos_stake",
     "pow_hash",
+    "committee_quantum",
+    "committee_greedy",
+    "committee_weighted",
+    "committee_uniform",
+    "committee_vrf_stake",
+    "committee_reputation",
+    "committee_composite_greedy",
+    "committee_fairness_only",
 ]
+
+COMMITTEE_BASELINE_STRATEGIES = [
+    "committee_quantum",
+    "committee_greedy",
+    "committee_weighted",
+    "committee_uniform",
+    "committee_vrf_stake",
+    "committee_reputation",
+    "committee_composite_greedy",
+    "committee_fairness_only",
+]
+
+LITERATURE_COMMITTEE_STRATEGIES = [
+    "committee_quantum",
+    "committee_vrf_stake",
+    "committee_reputation",
+    "committee_composite_greedy",
+    "committee_uniform",
+    "committee_fairness_only",
+]
+
+
+def resolve_strategy_preset(
+    preset: str,
+    cfg: SimulationConfig,
+) -> List[str]:
+    """Resolve a human-friendly strategy preset into strategy ids."""
+    if preset == "all":
+        return list(ALL_STRATEGIES)
+    if preset == "committee-all":
+        return list(COMMITTEE_BASELINE_STRATEGIES)
+    if preset == "literature":
+        return list(LITERATURE_COMMITTEE_STRATEGIES)
+    if preset == "reduced":
+        return [
+            "committee_quantum",
+            "committee_vrf_stake",
+            "committee_reputation",
+            "committee_composite_greedy",
+            "committee_uniform",
+            "committee_fairness_only",
+        ]
+    if preset == "reduced-with-exact":
+        strategies = resolve_strategy_preset("reduced", cfg)
+        if cfg.num_nodes <= cfg.exact_oracle_max_candidates:
+            strategies.append("committee_exact")
+        else:
+            print(
+                "  Skipping committee_exact in preset: "
+                f"num_nodes={cfg.num_nodes} exceeds exact_oracle_max_candidates={cfg.exact_oracle_max_candidates}"
+            )
+        return strategies
+    raise ValueError(f"Unknown strategy preset: {preset!r}")
+
+
+def run_committee_baseline_comparison(
+    cfg: SimulationConfig,
+    preset: str = "literature",
+) -> List[StrategyMetrics]:
+    """Run a committee-focused comparison using one of the built-in presets."""
+    strategies = resolve_strategy_preset(preset, cfg)
+    return run_strategy_comparison(cfg, strategies)
 
 
 def run_strategy_comparison(cfg: SimulationConfig, strategies: Optional[List[str]] = None) -> List[StrategyMetrics]:
@@ -909,6 +2051,35 @@ ABLATION_CONFIGS: Dict[str, Tuple[AblationConfig, dict]] = {
 }
 
 
+COMMITTEE_ABLATION_CONFIGS: Dict[str, CommitteeAblationDefinition] = {
+    "full_objective": CommitteeAblationDefinition(
+        strategy="committee_quantum",
+        ablation_config=AblationConfig(),
+        label="Full objective",
+    ),
+    "lambda_zero": CommitteeAblationDefinition(
+        strategy="committee_quantum",
+        ablation_config=AblationConfig(use_committee_pairwise_risk=False),
+        label="Pairwise risk off",
+    ),
+    "w_freq_zero": CommitteeAblationDefinition(
+        strategy="committee_quantum",
+        ablation_config=AblationConfig(use_fairness_penalty=False),
+        label="Fairness off",
+    ),
+    "no_fallback": CommitteeAblationDefinition(
+        strategy="committee_quantum",
+        ablation_config=AblationConfig(use_committee_fallback=False),
+        label="Fallback off",
+    ),
+    "score_only": CommitteeAblationDefinition(
+        strategy="committee_greedy",
+        ablation_config=None,
+        label="Score-only committee",
+    ),
+}
+
+
 def run_ablations(
     base_cfg: SimulationConfig,
     ablation_ids: Optional[List[str]] = None,
@@ -941,6 +2112,43 @@ def run_ablations(
         print(
             f"  PQI={m.pqi_mean:.3f}  attacker_share={m.attacker_share:.3f}  "
             f"gini={m.gini_coefficient:.3f}  missed={m.missed_slot_rate:.3f}"
+        )
+
+    return results
+
+
+def run_committee_ablations(
+    base_cfg: SimulationConfig,
+    ablation_ids: Optional[List[str]] = None,
+) -> Dict[str, StrategyMetrics]:
+    """Run committee-specific objective ablations under the current simulation workload."""
+    chosen = ablation_ids or list(COMMITTEE_ABLATION_CONFIGS.keys())
+    results: Dict[str, StrategyMetrics] = {}
+
+    for abl_id in chosen:
+        if abl_id not in COMMITTEE_ABLATION_CONFIGS:
+            print(f"  ⚠  Unknown committee ablation id: {abl_id!r}, skipping")
+            continue
+
+        definition = COMMITTEE_ABLATION_CONFIGS[abl_id]
+
+        import dataclasses
+        cfg = dataclasses.replace(base_cfg, **definition.cfg_overrides)
+
+        print(f"\n{'='*60}")
+        print(f"  Committee ablation: {abl_id}")
+        print(f"{'='*60}")
+        metrics = run_simulation(
+            cfg,
+            definition.strategy,
+            ablation_cfg=definition.ablation_config,
+            verbose=False,
+        )
+        metrics.name = definition.label or f"{definition.strategy}/{abl_id}"
+        results[abl_id] = metrics
+        print(
+            f"  objective={metrics.committee_objective_mean:.3f}  violations={metrics.committee_constraint_violation_rate:.3f}  "
+            f"diversity={metrics.committee_mean_unique_failure_domain_ratio:.3f}  fallback={metrics.committee_fallback_rate:.3f}"
         )
 
     return results
@@ -1010,6 +2218,34 @@ def _save_strategy_plots(metrics: List[StrategyMetrics], output_dir: str) -> Non
     plt.savefig(os.path.join(output_dir, f"eval_agreement_{timestamp}.png"))
     plt.close(fig)
 
+    committee_metrics = [m for m in metrics if m.committee_size > 1]
+    if committee_metrics:
+        committee_names = [m.name for m in committee_metrics]
+        xs = list(range(len(committee_names)))
+        width = 0.2
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
+        ax1.bar([i - width for i in xs], [m.committee_constraint_violation_rate for m in committee_metrics], width, label="Constraint violation rate")
+        ax1.bar(xs, [m.committee_mean_unique_failure_domain_ratio for m in committee_metrics], width, label="Unique failure-domain ratio")
+        ax1.bar([i + width for i in xs], [m.committee_attacker_seat_share for m in committee_metrics], width, label="Attacker seat share")
+        ax1.set_ylabel("Rate")
+        ax1.set_title("Committee Security & Diversity Metrics")
+        ax1.legend()
+        ax1.grid(True, linestyle="--", alpha=0.3)
+
+        ax2.bar([i - width for i in xs], [m.committee_fallback_rate for m in committee_metrics], width, label="Fallback rate")
+        ax2.bar(xs, [m.committee_objective_mean for m in committee_metrics], width, label="Objective mean")
+        ax2.bar([i + width for i in xs], [m.mean_solver_ms for m in committee_metrics], width, label="Mean solver ms")
+        ax2.set_ylabel("Mixed scale")
+        ax2.set_title("Committee Objective & Overhead")
+        ax2.set_xticks(xs)
+        ax2.set_xticklabels(committee_names, rotation=15, ha="right")
+        ax2.legend()
+        ax2.grid(True, linestyle="--", alpha=0.3)
+
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, f"eval_committee_metrics_{timestamp}.png"))
+        plt.close(fig)
+
     print(f"\n  Plots saved to {output_dir}/")
 
 
@@ -1053,6 +2289,122 @@ def _save_ablation_heatmap(ablation_results: Dict[str, StrategyMetrics], output_
     print(f"  Ablation heatmap saved to {output_dir}/")
 
 
+def save_committee_ablation_results(
+    cfg: SimulationConfig,
+    committee_ablation_metrics: Dict[str, StrategyMetrics],
+    output_dir: str,
+) -> str:
+    os.makedirs(output_dir, exist_ok=True)
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    path = os.path.join(output_dir, f"committee_ablations_{timestamp}.json")
+    payload = {
+        "config": {
+            "num_nodes": cfg.num_nodes,
+            "num_rounds": cfg.num_rounds,
+            "attacker_fraction": cfg.attacker_fraction,
+            "committee_k": cfg.committee_k,
+            "metadata_profile": cfg.metadata_profile,
+            "seed": cfg.seed,
+        },
+        "committee_ablations": {k: _metrics_to_dict(v) for k, v in committee_ablation_metrics.items()},
+    }
+    with open(path, "w") as f:
+        json.dump(payload, f, indent=2)
+    print(f"\n  Committee ablation JSON saved to {path}")
+    return path
+
+
+def _save_committee_ablation_plots(
+    committee_ablation_metrics: Dict[str, StrategyMetrics],
+    output_dir: str,
+) -> None:
+    if not committee_ablation_metrics:
+        return
+
+    os.makedirs(output_dir, exist_ok=True)
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    labels = [committee_ablation_metrics[key].name for key in committee_ablation_metrics.keys()]
+    metrics = [committee_ablation_metrics[key] for key in committee_ablation_metrics.keys()]
+    xs = list(range(len(labels)))
+    width = 0.2
+
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    ax = axes[0][0]
+    ax.bar([i - width for i in xs], [m.committee_constraint_violation_rate for m in metrics], width, label="Violation rate")
+    ax.bar(xs, [m.committee_mean_unique_failure_domain_ratio for m in metrics], width, label="Unique failure-domain ratio")
+    ax.bar([i + width for i in xs], [m.committee_attacker_seat_share for m in metrics], width, label="Attacker seat share")
+    ax.set_title("Committee resilience metrics")
+    ax.set_ylabel("Rate")
+    ax.legend()
+    ax.grid(True, linestyle="--", alpha=0.3)
+
+    ax = axes[0][1]
+    ax.bar([i - width / 2 for i in xs], [m.committee_objective_mean for m in metrics], width, label="Objective mean")
+    ax.bar([i + width / 2 for i in xs], [m.committee_raw_objective_mean for m in metrics], width, label="Raw objective mean")
+    ax.set_title("Committee objective quality")
+    ax.set_ylabel("Objective")
+    ax.legend()
+    ax.grid(True, linestyle="--", alpha=0.3)
+
+    ax = axes[1][0]
+    ax.bar([i - width for i in xs], [m.committee_fallback_rate for m in metrics], width, label="Fallback rate")
+    ax.bar(xs, [m.mean_solver_ms for m in metrics], width, label="Mean solver ms")
+    ax.bar([i + width for i in xs], [m.p95_block_time_ms for m in metrics], width, label="P95 block time ms")
+    ax.set_title("Fallback and latency overhead")
+    ax.set_ylabel("Mixed scale")
+    ax.legend()
+    ax.grid(True, linestyle="--", alpha=0.3)
+
+    ax = axes[1][1]
+    ax.bar([i - width / 2 for i in xs], [m.attacker_share for m in metrics], width, label="Attacker proposer share")
+    ax.bar([i + width / 2 for i in xs], [m.missed_slot_rate for m in metrics], width, label="Missed slot rate")
+    ax.set_title("Leader-path impact")
+    ax.set_ylabel("Rate")
+    ax.legend()
+    ax.grid(True, linestyle="--", alpha=0.3)
+
+    for ax in axes[1]:
+        ax.set_xticks(xs)
+        ax.set_xticklabels(labels, rotation=15, ha="right")
+    for ax in axes[0]:
+        ax.set_xticks(xs)
+        ax.set_xticklabels(labels, rotation=15, ha="right")
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, f"committee_ablations_{timestamp}.png"))
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+    heatmap_metrics = [
+        "committee_objective_mean",
+        "committee_constraint_violation_rate",
+        "committee_mean_unique_failure_domain_ratio",
+        "committee_attacker_seat_share",
+        "committee_fallback_rate",
+        "mean_solver_ms",
+    ]
+    heatmap_data = []
+    for metric in metrics:
+        heatmap_data.append([
+            metric.committee_objective_mean,
+            metric.committee_constraint_violation_rate,
+            metric.committee_mean_unique_failure_domain_ratio,
+            metric.committee_attacker_seat_share,
+            metric.committee_fallback_rate,
+            metric.mean_solver_ms,
+        ])
+    im = ax.imshow(heatmap_data, aspect="auto", cmap="RdYlGn_r")
+    ax.set_xticks(range(len(heatmap_metrics)))
+    ax.set_xticklabels(heatmap_metrics, rotation=30, ha="right")
+    ax.set_yticks(range(len(labels)))
+    ax.set_yticklabels(labels)
+    ax.set_title("Committee ablation overview")
+    plt.colorbar(im, ax=ax)
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, f"committee_ablations_heatmap_{timestamp}.png"))
+    plt.close(fig)
+
+
 # ---------------------------------------------------------------------------
 # JSON output
 # ---------------------------------------------------------------------------
@@ -1072,6 +2424,36 @@ def _metrics_to_dict(m: StrategyMetrics) -> dict:
         "agreement_rate": m.agreement_rate,
         "mean_solver_ms": m.mean_solver_ms,
         "view_change_rate": m.view_change_rate,
+        "committee_size": m.committee_size,
+        "committee_constraint_violation_rate": m.committee_constraint_violation_rate,
+        "committee_mean_unique_failure_domain_ratio": m.committee_mean_unique_failure_domain_ratio,
+        "committee_attacker_seat_share": m.committee_attacker_seat_share,
+        "committee_fallback_rate": m.committee_fallback_rate,
+        "committee_objective_mean": m.committee_objective_mean,
+        "committee_raw_objective_mean": m.committee_raw_objective_mean,
+        "committee_candidate_count_mean": m.committee_candidate_count_mean,
+    }
+
+
+def _solver_metrics_to_dict(m: SolverComparisonMetrics) -> dict:
+    return {
+        "candidate_count": m.candidate_count,
+        "committee_k": m.committee_k,
+        "n_trials": m.n_trials,
+        "exact_objective_mean": m.exact_objective_mean,
+        "quantum_objective_mean": m.quantum_objective_mean,
+        "greedy_objective_mean": m.greedy_objective_mean,
+        "weighted_objective_mean": m.weighted_objective_mean,
+        "quantum_optimality_gap_mean": m.quantum_optimality_gap_mean,
+        "greedy_optimality_gap_mean": m.greedy_optimality_gap_mean,
+        "weighted_optimality_gap_mean": m.weighted_optimality_gap_mean,
+        "quantum_disagreement_rate": m.quantum_disagreement_rate,
+        "greedy_disagreement_rate": m.greedy_disagreement_rate,
+        "weighted_disagreement_rate": m.weighted_disagreement_rate,
+        "quantum_solver_ms_mean": m.quantum_solver_ms_mean,
+        "exact_solver_ms_mean": m.exact_solver_ms_mean,
+        "greedy_solver_ms_mean": m.greedy_solver_ms_mean,
+        "weighted_solver_ms_mean": m.weighted_solver_ms_mean,
     }
 
 
@@ -1092,6 +2474,10 @@ def save_results(
             "network_delay_model": cfg.network_delay_model,
             "churn_rate": cfg.churn_rate,
             "measurement_noise": cfg.measurement_noise,
+            "committee_k": cfg.committee_k,
+            "primary_leader_policy": cfg.primary_leader_policy,
+            "metadata_profile": cfg.metadata_profile,
+            "metadata_manifest": cfg.metadata_manifest,
             "seed": cfg.seed,
         },
         "strategy_comparison": [_metrics_to_dict(m) for m in strategy_metrics],
@@ -1104,13 +2490,78 @@ def save_results(
     return path
 
 
+def save_solver_comparison_results(
+    cfg: SimulationConfig,
+    solver_metrics: List[SolverComparisonMetrics],
+    output_dir: str,
+) -> str:
+    os.makedirs(output_dir, exist_ok=True)
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    path = os.path.join(output_dir, f"solver_comparison_{timestamp}.json")
+    payload = {
+        "config": {
+            "committee_k": cfg.committee_k,
+            "metadata_profile": cfg.metadata_profile,
+            "attacker_fraction": cfg.attacker_fraction,
+            "measurement_noise": cfg.measurement_noise,
+            "seed": cfg.seed,
+            "exact_oracle_max_candidates": cfg.exact_oracle_max_candidates,
+        },
+        "solver_comparison": [_solver_metrics_to_dict(m) for m in solver_metrics],
+    }
+    with open(path, "w") as f:
+        json.dump(payload, f, indent=2)
+    print(f"\n  Solver comparison JSON saved to {path}")
+    return path
+
+
+def _save_solver_comparison_plot(
+    solver_metrics: List[SolverComparisonMetrics],
+    output_dir: str,
+) -> None:
+    if not solver_metrics:
+        return
+
+    os.makedirs(output_dir, exist_ok=True)
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    candidate_counts = [m.candidate_count for m in solver_metrics]
+
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 10), sharex=True)
+    ax1.plot(candidate_counts, [m.quantum_optimality_gap_mean for m in solver_metrics], marker="o", label="Quantum gap")
+    ax1.plot(candidate_counts, [m.greedy_optimality_gap_mean for m in solver_metrics], marker="s", label="Greedy gap")
+    ax1.plot(candidate_counts, [m.weighted_optimality_gap_mean for m in solver_metrics], marker="^", label="Weighted gap")
+    ax1.set_ylabel("Mean optimality gap")
+    ax1.set_title("Solver Quality vs Candidate-Set Size")
+    ax1.grid(True, linestyle="--", alpha=0.4)
+    ax1.legend()
+
+    ax2.plot(candidate_counts, [m.quantum_disagreement_rate for m in solver_metrics], marker="o", label="Quantum")
+    ax2.plot(candidate_counts, [m.greedy_disagreement_rate for m in solver_metrics], marker="s", label="Greedy")
+    ax2.plot(candidate_counts, [m.weighted_disagreement_rate for m in solver_metrics], marker="^", label="Weighted")
+    ax2.set_ylabel("Disagreement rate")
+    ax2.grid(True, linestyle="--", alpha=0.4)
+    ax2.legend()
+
+    ax3.plot(candidate_counts, [m.quantum_solver_ms_mean for m in solver_metrics], marker="o", label="Quantum")
+    ax3.plot(candidate_counts, [m.exact_solver_ms_mean for m in solver_metrics], marker="x", label="Exact oracle")
+    ax3.plot(candidate_counts, [m.greedy_solver_ms_mean for m in solver_metrics], marker="s", label="Greedy")
+    ax3.plot(candidate_counts, [m.weighted_solver_ms_mean for m in solver_metrics], marker="^", label="Weighted")
+    ax3.set_xlabel("Candidate-set size M")
+    ax3.set_ylabel("Mean solver time (ms)")
+    ax3.grid(True, linestyle="--", alpha=0.4)
+    ax3.legend()
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, f"solver_comparison_{timestamp}.png"))
+    plt.close(fig)
+
+
 # ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
 
 def main() -> None:
     import argparse
-    import dataclasses
 
     parser = argparse.ArgumentParser(
         description="Evaluation overhaul: large-scale multi-baseline quantum consensus benchmark",
@@ -1120,11 +2571,32 @@ def main() -> None:
     parser.add_argument("--attacker-fraction", type=float, default=0.2)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output-dir", type=str, default="reports")
+    parser.add_argument("--committee-k", type=int, default=5)
+    parser.add_argument(
+        "--metadata-profile",
+        type=str,
+        default="synthetic_static",
+        choices=["synthetic_static", "clustered_attackers"],
+    )
+    parser.add_argument(
+        "--primary-leader-policy",
+        type=str,
+        default="highest_score",
+        choices=["highest_score", "vrf_hash"],
+    )
+    parser.add_argument("--exact-oracle-max-candidates", type=int, default=16)
     parser.add_argument(
         "--strategies",
         nargs="+",
         default=None,
         help="Strategies to evaluate (default: all)",
+    )
+    parser.add_argument(
+        "--strategy-preset",
+        type=str,
+        default=None,
+        choices=["all", "committee-all", "literature", "reduced", "reduced-with-exact"],
+        help="Use a built-in strategy preset when --strategies is omitted.",
     )
     parser.add_argument(
         "--ablations",
@@ -1137,6 +2609,12 @@ def main() -> None:
     parser.add_argument("--churn-rate", type=float, default=0.0)
     parser.add_argument("--measurement-noise", type=float, default=0.0)
     parser.add_argument("--max-candidates", type=int, default=100)
+    parser.add_argument("--skip-strategy-comparison", action="store_true")
+    parser.add_argument("--solver-study", action="store_true")
+    parser.add_argument("--solver-study-candidate-sizes", nargs="*", type=int, default=None)
+    parser.add_argument("--solver-study-seed-count", type=int, default=5)
+    parser.add_argument("--committee-ablation-study", action="store_true")
+    parser.add_argument("--committee-ablation-ids", nargs="*", default=None)
     parser.add_argument("--skip-plots", action="store_true")
     args = parser.parse_args()
 
@@ -1150,17 +2628,50 @@ def main() -> None:
         churn_rate=args.churn_rate,
         measurement_noise=args.measurement_noise,
         max_candidate_nodes=args.max_candidates,
+        committee_k=args.committee_k,
+        primary_leader_policy=args.primary_leader_policy,
+        metadata_profile=args.metadata_profile,
+        exact_oracle_max_candidates=args.exact_oracle_max_candidates,
+        solver_study_candidate_sizes=list(args.solver_study_candidate_sizes or [6, 8, 10, 12, 14, 16]),
+        solver_study_seed_count=args.solver_study_seed_count,
     )
+    run_layout = create_run_layout(cfg.output_dir, "evaluation_overhaul")
+    write_run_metadata(
+        run_layout,
+        {
+            "tool": "evaluation_overhaul",
+            "layout": run_layout.to_dict(),
+            "config": {
+                "num_nodes": cfg.num_nodes,
+                "num_rounds": cfg.num_rounds,
+                "attacker_fraction": cfg.attacker_fraction,
+                "seed": cfg.seed,
+                "committee_k": cfg.committee_k,
+                "strategy_preset": args.strategy_preset,
+                "strategies": args.strategies,
+                "solver_study": args.solver_study,
+                "committee_ablation_study": args.committee_ablation_study,
+            },
+        },
+    )
+
+    selected_strategies = args.strategies
+    if selected_strategies is None and args.strategy_preset is not None:
+        selected_strategies = resolve_strategy_preset(args.strategy_preset, cfg)
 
     print("=" * 70)
     print("  EVALUATION OVERHAUL")
     print(f"  nodes={cfg.num_nodes}  rounds={cfg.num_rounds}  seed={cfg.seed}")
     print(f"  network_delay={cfg.network_delay_model}  churn={cfg.churn_rate}  noise={cfg.measurement_noise}")
+    print(f"  committee_k={cfg.committee_k}  metadata_profile={cfg.metadata_profile}  leader_policy={cfg.primary_leader_policy}")
+    print(f"  run_output={run_layout.root_dir}")
     print(f"  OR-Tools ILP available: {_ORTOOLS_AVAILABLE}")
     print("=" * 70)
 
     # Strategy comparison
-    strategy_metrics = run_strategy_comparison(cfg, args.strategies)
+    strategy_metrics: List[StrategyMetrics] = []
+    if not args.skip_strategy_comparison:
+        strategy_metrics = run_strategy_comparison(cfg, selected_strategies)
 
     # Ablations
     ablation_metrics: Dict[str, StrategyMetrics] = {}
@@ -1169,13 +2680,36 @@ def main() -> None:
         ablation_metrics = run_ablations(cfg, abl_ids)
 
     # Save JSON
-    save_results(cfg, strategy_metrics, ablation_metrics, args.output_dir)
+    if strategy_metrics or ablation_metrics:
+        save_results(cfg, strategy_metrics, ablation_metrics, run_layout.data_dir)
 
     # Plots
-    if not args.skip_plots:
-        _save_strategy_plots(strategy_metrics, args.output_dir)
+    if strategy_metrics and not args.skip_plots:
+        _save_strategy_plots(strategy_metrics, run_layout.figures_dir)
         if ablation_metrics:
-            _save_ablation_heatmap(ablation_metrics, args.output_dir)
+            _save_ablation_heatmap(ablation_metrics, run_layout.figures_dir)
+
+    if args.solver_study:
+        solver_metrics = run_solver_comparison_study(
+            cfg,
+            candidate_sizes=args.solver_study_candidate_sizes,
+            seed_count=args.solver_study_seed_count,
+        )
+        save_solver_comparison_results(cfg, solver_metrics, run_layout.data_dir)
+        if not args.skip_plots:
+            _save_solver_comparison_plot(solver_metrics, run_layout.figures_dir)
+
+    if args.committee_ablation_study:
+        committee_ablation_metrics = run_committee_ablations(
+            cfg,
+            ablation_ids=args.committee_ablation_ids,
+        )
+        save_committee_ablation_results(cfg, committee_ablation_metrics, run_layout.data_dir)
+        if not args.skip_plots:
+            _save_committee_ablation_plots(committee_ablation_metrics, run_layout.figures_dir)
+
+    if strategy_metrics or ablation_metrics:
+        _refresh_live_findings_dashboard(cfg.output_dir)
 
 
 if __name__ == "__main__":

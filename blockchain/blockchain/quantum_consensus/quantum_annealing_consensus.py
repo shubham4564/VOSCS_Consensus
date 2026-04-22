@@ -8,7 +8,9 @@ import json
 import secrets
 import socket
 import importlib.util
-from typing import Dict, List, Tuple, Optional
+from dataclasses import dataclass, field
+from itertools import combinations
+from typing import Any, Dict, List, Tuple, Optional
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives import hashes
@@ -91,6 +93,42 @@ class VerifiableUptimeRecord:
             consensus_timestamp=data['consensus_timestamp']
         )
 
+
+@dataclass
+class CommitteeSelectionResult:
+    """Structured output for committee selection experiments and future runtime integration."""
+
+    committee_nodes: List[str]
+    primary_leader: Optional[str]
+    effective_scores: Dict[str, float]
+    pairwise_features: Dict[str, Dict[str, float]]
+    solver_time_ms: float
+    used_fallback: bool = False
+    candidate_count: int = 0
+    raw_committee_nodes: List[str] = field(default_factory=list)
+    objective_value: float = 0.0
+    raw_objective_value: float = 0.0
+    objective_breakdown: Dict[str, float] = field(default_factory=dict)
+    raw_objective_breakdown: Dict[str, float] = field(default_factory=dict)
+    fallback_reason: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'committee_nodes': self.committee_nodes,
+            'primary_leader': self.primary_leader,
+            'effective_scores': self.effective_scores,
+            'pairwise_features': self.pairwise_features,
+            'solver_time_ms': self.solver_time_ms,
+            'used_fallback': self.used_fallback,
+            'candidate_count': self.candidate_count,
+            'raw_committee_nodes': self.raw_committee_nodes,
+            'objective_value': self.objective_value,
+            'raw_objective_value': self.raw_objective_value,
+            'objective_breakdown': self.objective_breakdown,
+            'raw_objective_breakdown': self.raw_objective_breakdown,
+            'fallback_reason': self.fallback_reason,
+        }
+
 # Import scalability configuration
 try:
     # Try to import scalability config using importlib for dynamic loading
@@ -152,6 +190,14 @@ class AblationConfig:
         use_vrf_tiebreak:      Add VRF-based perturbation δi to effective
                                scores.  Set False to measure deterministic
                                agreement contribution.
+        use_committee_pairwise_risk:
+                       Include pairwise committee-risk penalties in the
+                       exact-k committee objective.  Set False for the
+                       lambda=0 / score-only objective ablation.
+        use_committee_fallback:
+                       Repair non-exact-k committee solutions to exact-k.
+                       Set False to measure the effect of disabling the
+                       deterministic repair fallback.
         witness_quorum_size:   Override the minimum witness count used by
                                execute_probe_protocol (None = use instance
                                default).
@@ -163,12 +209,16 @@ class AblationConfig:
         use_witness_quorum: bool = True,
         use_qubo_solver: bool = True,
         use_vrf_tiebreak: bool = True,
+        use_committee_pairwise_risk: bool = True,
+        use_committee_fallback: bool = True,
         witness_quorum_size: Optional[int] = None,
     ) -> None:
         self.use_fairness_penalty = use_fairness_penalty
         self.use_witness_quorum = use_witness_quorum
         self.use_qubo_solver = use_qubo_solver
         self.use_vrf_tiebreak = use_vrf_tiebreak
+        self.use_committee_pairwise_risk = use_committee_pairwise_risk
+        self.use_committee_fallback = use_committee_fallback
         self.witness_quorum_size = witness_quorum_size
 
 
@@ -259,9 +309,128 @@ class QuantumAnnealingConsensus:
         self.node_performance_cache = {}  # Cache calculated scores
         self.last_probe_round = 0  # Track probe rounds for efficient scheduling
         self.cluster_representatives = {}  # Geographic/performance clusters
+        self.committee_feature_cache = {}  # Pairwise committee features keyed by active metadata snapshot
+        self.committee_latency_anchor_count = 8  # Max tracked RTT anchors for topology fingerprints
+        self.committee_history_window = 128  # Rolling samples for committee-level pairwise features
         
         if initialize_genesis:
             self.initialize_genesis_node()
+
+    def _default_committee_metadata(self, node_id: str, metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Return normalized static metadata used by committee diversity constraints."""
+        normalized_metadata = {
+            'asn': 'unknown',
+            'cloud_provider': 'unknown',
+            'region': 'unknown',
+            'datacenter': 'unknown',
+            'country_code': 'unknown',
+            'operator_id': node_id,
+            'failure_domain': 'unknown',
+            'metadata_source': 'local',
+        }
+
+        if metadata:
+            for key, value in metadata.items():
+                if value is None:
+                    continue
+                normalized_metadata[key] = value
+
+        return normalized_metadata
+
+    def _build_node_state(
+        self,
+        node_id: str,
+        public_key: str,
+        current_time: float,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Create the canonical node-state structure used by single and committee selection."""
+        initial_latency = 0.05
+        initial_throughput = 10.0
+
+        return {
+            'public_key': public_key,
+            'uptime': 1.0,
+            'latency': initial_latency,
+            'throughput': initial_throughput,
+            'last_seen': current_time,
+            'proposal_success_count': 0,
+            'proposal_failure_count': 0,
+            'performance_history': [],
+            'cluster_id': None,
+            'trust_score': 0.5,
+            'uptime_periods': [(current_time - 60, current_time)],
+            'response_count': 0,
+            'measurement_window_start': current_time,
+            'last_registration': current_time,
+            # Committee-selection inputs. These stay inert until committee logic consumes them.
+            'committee_metadata': self._default_committee_metadata(node_id, metadata),
+            'uptime_history': [1],
+            'latency_history': [initial_latency],
+            'throughput_history': [initial_throughput],
+            'latency_vector': {},
+            'committee_selection_count': 0,
+            'last_committee_epoch': None,
+        }
+
+    def update_node_committee_metadata(self, node_id: str, metadata: Dict[str, Any]) -> None:
+        """Merge static metadata updates for committee-aware selection and invalidate derived caches."""
+        if node_id not in self.nodes or not metadata:
+            return
+
+        committee_metadata = self.nodes[node_id].setdefault(
+            'committee_metadata',
+            self._default_committee_metadata(node_id),
+        )
+
+        for key, value in metadata.items():
+            if value is None:
+                continue
+            committee_metadata[key] = value
+
+        self.committee_feature_cache.clear()
+
+    def append_committee_observation(
+        self,
+        node_id: str,
+        *,
+        uptime_sample: Optional[int] = None,
+        latency_sample: Optional[float] = None,
+        throughput_sample: Optional[float] = None,
+        anchor_id: Optional[str] = None,
+    ) -> None:
+        """Track rolling histories needed for pairwise committee features."""
+        if node_id not in self.nodes:
+            return
+
+        node_state = self.nodes[node_id]
+
+        if uptime_sample is not None:
+            uptime_history = node_state.setdefault('uptime_history', [])
+            uptime_history.append(1 if uptime_sample else 0)
+            if len(uptime_history) > self.committee_history_window:
+                del uptime_history[:-self.committee_history_window]
+
+        if latency_sample is not None:
+            latency_history = node_state.setdefault('latency_history', [])
+            latency_history.append(latency_sample)
+            if len(latency_history) > self.committee_history_window:
+                del latency_history[:-self.committee_history_window]
+
+            if anchor_id is not None:
+                latency_vector = node_state.setdefault('latency_vector', {})
+                latency_vector[anchor_id] = latency_sample
+                if len(latency_vector) > self.committee_latency_anchor_count:
+                    oldest_anchor = next(iter(latency_vector))
+                    del latency_vector[oldest_anchor]
+
+        if throughput_sample is not None:
+            throughput_history = node_state.setdefault('throughput_history', [])
+            throughput_history.append(throughput_sample)
+            if len(throughput_history) > self.committee_history_window:
+                del throughput_history[:-self.committee_history_window]
+
+        self.committee_feature_cache.clear()
 
     def generate_node_keys(self, node_id: str) -> Tuple[str, str]:
         """Generate ECDSA P-256 key pair for a node"""
@@ -586,7 +755,7 @@ class QuantumAnnealingConsensus:
                 'measurement_window_start': time.time()
             }
 
-    def register_node(self, node_id: str, public_key: str):
+    def register_node(self, node_id: str, public_key: str, metadata: Optional[Dict[str, Any]] = None):
         """Register a new node in the network with scalable performance tracking and cryptographic keys"""
         current_time = time.time()
         
@@ -594,35 +763,30 @@ class QuantumAnnealingConsensus:
             # Load cryptographic keys from files if available, generate if not
             if node_id not in self.node_keys:
                 self.ensure_node_keys(node_id)
-            
-            self.nodes[node_id] = {
-                'public_key': public_key,
-                'uptime': 1.0,  # FIXED: Start with full uptime instead of 0.0
-                'latency': 0.05,  # FIXED: Start with reasonable latency instead of infinity
-                'throughput': 10.0,  # FIXED: Start with reasonable throughput instead of 0.0
-                'last_seen': current_time,
-                'proposal_success_count': 0,
-                'proposal_failure_count': 0,
-                'performance_history': [],  # Track recent performance
-                'cluster_id': None,  # For geographic clustering
-                'trust_score': 0.5,  # Initial trust score
-                'uptime_periods': [(current_time - 60, current_time)],  # FIXED: Add initial uptime period
-                'response_count': 0,  # Count of valid probe responses
-                'measurement_window_start': current_time,  # Start of current measurement window
-                'last_registration': current_time  # Track registration frequency for CPU optimization
-            }
+
+            self.nodes[node_id] = self._build_node_state(
+                node_id,
+                public_key,
+                current_time,
+                metadata=metadata,
+            )
             
             # Clear performance cache when new nodes join
             self.node_performance_cache.clear()
+            self.committee_feature_cache.clear()
         else:
             # For existing nodes, only update if sufficient time has passed (CPU optimization)
             last_registration = self.nodes[node_id].get('last_registration', 0)
             if current_time - last_registration < 30:  # Don't update more than once per 30 seconds
+                if metadata:
+                    self.update_node_committee_metadata(node_id, metadata)
                 return
             
             # Update last seen and registration time
             self.nodes[node_id]['last_seen'] = current_time
             self.nodes[node_id]['last_registration'] = current_time
+            if metadata:
+                self.update_node_committee_metadata(node_id, metadata)
 
     def cleanup_performance_data(self):
         """Clean up old performance data to manage memory for 1000+ nodes efficiently"""
@@ -2574,6 +2738,571 @@ class QuantumAnnealingConsensus:
         
         return original_score + perturbation
 
+    def _positive_uptime_correlation(self, node_a: str, node_b: str) -> float:
+        """Return positive Pearson correlation over rolling binary uptime histories."""
+        history_a = self.nodes.get(node_a, {}).get('uptime_history', [])
+        history_b = self.nodes.get(node_b, {}).get('uptime_history', [])
+        sample_size = min(len(history_a), len(history_b))
+
+        if sample_size < 2:
+            return 0.0
+
+        window_a = history_a[-sample_size:]
+        window_b = history_b[-sample_size:]
+        mean_a = sum(window_a) / sample_size
+        mean_b = sum(window_b) / sample_size
+
+        variance_a = sum((value - mean_a) ** 2 for value in window_a) / sample_size
+        variance_b = sum((value - mean_b) ** 2 for value in window_b) / sample_size
+        if variance_a <= 0.0 or variance_b <= 0.0:
+            return 0.0
+
+        covariance = sum(
+            (window_a[index] - mean_a) * (window_b[index] - mean_b)
+            for index in range(sample_size)
+        ) / sample_size
+        correlation = covariance / math.sqrt(variance_a * variance_b)
+        return max(0.0, min(1.0, correlation))
+
+    def _latency_similarity(self, node_a: str, node_b: str) -> float:
+        """Compare RTT fingerprints; fall back to scalar-latency similarity when anchors are sparse."""
+        vector_a = self.nodes.get(node_a, {}).get('latency_vector', {})
+        vector_b = self.nodes.get(node_b, {}).get('latency_vector', {})
+        common_anchors = sorted(set(vector_a.keys()) & set(vector_b.keys()))
+
+        if len(common_anchors) >= 2:
+            values_a = [vector_a[anchor] for anchor in common_anchors]
+            values_b = [vector_b[anchor] for anchor in common_anchors]
+            norm_a = math.sqrt(sum(value * value for value in values_a))
+            norm_b = math.sqrt(sum(value * value for value in values_b))
+            if norm_a > 0.0 and norm_b > 0.0:
+                cosine = sum(values_a[i] * values_b[i] for i in range(len(common_anchors))) / (norm_a * norm_b)
+                return max(0.0, min(1.0, cosine))
+
+        latency_a = self.nodes.get(node_a, {}).get('latency', float('inf'))
+        latency_b = self.nodes.get(node_b, {}).get('latency', float('inf'))
+        if not math.isfinite(latency_a) or not math.isfinite(latency_b):
+            return 0.0
+
+        normalizer = max(latency_a, latency_b, 1e-9)
+        return max(0.0, min(1.0, 1.0 - abs(latency_a - latency_b) / normalizer))
+
+    def _throughput_similarity(self, node_a: str, node_b: str, candidate_nodes: List[str]) -> float:
+        """Similarity of throughput capacity; closer values imply more correlated infrastructure type."""
+        throughput_a = self.nodes.get(node_a, {}).get('throughput', 0.0)
+        throughput_b = self.nodes.get(node_b, {}).get('throughput', 0.0)
+        max_throughput = max(
+            [self.nodes.get(node_id, {}).get('throughput', 0.0) for node_id in candidate_nodes] + [1.0]
+        )
+        return max(0.0, min(1.0, 1.0 - abs(throughput_a - throughput_b) / max_throughput))
+
+    def _pairwise_centralization_penalty(self, node_a: str, node_b: str, committee_k: int) -> float:
+        """Penalty for repeatedly co-selecting historically dominant nodes."""
+        freq_a = self.calculate_selection_frequency(node_a)
+        freq_b = self.calculate_selection_frequency(node_b)
+        normalization = max(committee_k, 1) ** 2
+        return (freq_a * freq_b) / normalization
+
+    def build_committee_pairwise_features(
+        self,
+        candidate_nodes: List[str],
+        committee_k: int,
+        coupling_weights: Optional[Dict[str, float]] = None,
+    ) -> Dict[Tuple[int, int], Dict[str, float]]:
+        """Compute non-uniform pairwise committee couplings from verifiable or synthetic node features."""
+        weights = {
+            'infrastructure': 1.0,
+            'as_conflict': 1.0,
+            'datacenter_conflict': 0.5,
+            'cloud_conflict': 0.5,
+            'uptime_correlation': 1.0,
+            'latency_similarity': 0.75,
+            'throughput_similarity': 0.25,
+            'centralization': 0.50,
+        }
+        if coupling_weights:
+            weights.update(coupling_weights)
+
+        metadata_snapshot = {
+            node_id: self.nodes.get(node_id, {}).get('committee_metadata', {})
+            for node_id in candidate_nodes
+        }
+        cache_key = json.dumps(
+            {
+                'candidate_nodes': candidate_nodes,
+                'committee_k': committee_k,
+                'weights': weights,
+                'metadata': metadata_snapshot,
+                'last_seen': {
+                    node_id: round(self.nodes.get(node_id, {}).get('last_seen', 0.0), 3)
+                    for node_id in candidate_nodes
+                },
+                'selection_window': len(self.selection_history),
+            },
+            sort_keys=True,
+            default=str,
+        )
+        cached_features = self.committee_feature_cache.get(cache_key)
+        if cached_features is not None:
+            return cached_features
+
+        pairwise_features: Dict[Tuple[int, int], Dict[str, float]] = {}
+        for i, node_a in enumerate(candidate_nodes):
+            metadata_a = self.nodes.get(node_a, {}).get('committee_metadata', {})
+            for j in range(i + 1, len(candidate_nodes)):
+                node_b = candidate_nodes[j]
+                metadata_b = self.nodes.get(node_b, {}).get('committee_metadata', {})
+
+                infrastructure_penalty = weights['infrastructure'] * (
+                    weights['as_conflict'] * float(metadata_a.get('asn') == metadata_b.get('asn'))
+                    + weights['datacenter_conflict'] * float(metadata_a.get('datacenter') == metadata_b.get('datacenter'))
+                    + weights['cloud_conflict'] * float(metadata_a.get('cloud_provider') == metadata_b.get('cloud_provider'))
+                )
+                uptime_correlation = self._positive_uptime_correlation(node_a, node_b)
+                latency_similarity = self._latency_similarity(node_a, node_b)
+                throughput_similarity = self._throughput_similarity(node_a, node_b, candidate_nodes)
+                centralization_penalty = self._pairwise_centralization_penalty(node_a, node_b, committee_k)
+
+                total_penalty = (
+                    infrastructure_penalty
+                    + weights['uptime_correlation'] * uptime_correlation
+                    + weights['latency_similarity'] * latency_similarity
+                    + weights['throughput_similarity'] * throughput_similarity
+                    + weights['centralization'] * centralization_penalty
+                )
+
+                pairwise_features[(i, j)] = {
+                    'infrastructure_penalty': infrastructure_penalty,
+                    'uptime_correlation': uptime_correlation,
+                    'latency_similarity': latency_similarity,
+                    'throughput_similarity': throughput_similarity,
+                    'centralization_penalty': centralization_penalty,
+                    'total_penalty': total_penalty,
+                }
+
+        self.committee_feature_cache[cache_key] = pairwise_features
+        return pairwise_features
+
+    def formulate_committee_qubo_problem(
+        self,
+        vrf_output: str,
+        candidate_nodes: Optional[List[str]] = None,
+        committee_k: int = 5,
+        coupling_weights: Optional[Dict[str, float]] = None,
+        constraint_penalty: Optional[float] = None,
+    ) -> Tuple[Dict[int, float], Dict[Tuple[int, int], float], float, Dict[str, float], Dict[Tuple[int, int], Dict[str, float]]]:
+        """Formulate the enriched exact-k committee QUBO with non-uniform pairwise couplings."""
+        nodes = candidate_nodes if candidate_nodes is not None else list(self.nodes.keys())
+        if not nodes:
+            return {}, {}, 0.0, {}, {}
+
+        effective_scores = {
+            node_id: self.calculate_effective_score(node_id, vrf_output)
+            for node_id in nodes
+        }
+        penalty = constraint_penalty if constraint_penalty is not None else self.penalty_coefficient
+        linear_coefficients: Dict[int, float] = {}
+        quadratic_coefficients: Dict[Tuple[int, int], float] = {}
+
+        for index, node_id in enumerate(nodes):
+            linear_coefficients[index] = penalty * (1 - 2 * committee_k) - effective_scores[node_id]
+
+        pairwise_features = self.build_committee_pairwise_features(nodes, committee_k, coupling_weights)
+        if not self.ablation.use_committee_pairwise_risk:
+            pairwise_features = {
+                key: {
+                    'infrastructure_penalty': 0.0,
+                    'uptime_correlation': 0.0,
+                    'latency_similarity': 0.0,
+                    'throughput_similarity': 0.0,
+                    'centralization_penalty': 0.0,
+                    'total_penalty': 0.0,
+                }
+                for key in pairwise_features.keys()
+            }
+        for i in range(len(nodes)):
+            for j in range(i + 1, len(nodes)):
+                feature_bundle = pairwise_features.get((i, j), {})
+                quadratic_coefficients[(i, j)] = 2 * penalty + feature_bundle.get('total_penalty', 0.0)
+
+        constant_offset = penalty * (committee_k ** 2)
+        return (
+            linear_coefficients,
+            quadratic_coefficients,
+            constant_offset,
+            effective_scores,
+            pairwise_features,
+        )
+
+    def _committee_objective_breakdown_from_indices(
+        self,
+        selected_indices: List[int],
+        candidate_nodes: List[str],
+        committee_k: int,
+        effective_scores: Dict[str, float],
+        pairwise_features: Dict[Tuple[int, int], Dict[str, float]],
+        constraint_penalty: float,
+    ) -> Dict[str, float]:
+        """Return an interpretable objective breakdown for a committee assignment."""
+        normalized_indices = sorted({index for index in selected_indices if 0 <= index < len(candidate_nodes)})
+        selected_nodes = [candidate_nodes[index] for index in normalized_indices]
+
+        score_reward = sum(effective_scores.get(node_id, 0.0) for node_id in selected_nodes)
+        score_term = -score_reward
+
+        infrastructure_penalty = 0.0
+        uptime_correlation_penalty = 0.0
+        latency_similarity_penalty = 0.0
+        throughput_similarity_penalty = 0.0
+        centralization_penalty = 0.0
+        pairwise_risk_term = 0.0
+
+        for i, j in combinations(normalized_indices, 2):
+            feature_bundle = pairwise_features.get((i, j), {})
+            infrastructure_penalty += feature_bundle.get('infrastructure_penalty', 0.0)
+            uptime_correlation_penalty += feature_bundle.get('uptime_correlation', 0.0)
+            latency_similarity_penalty += feature_bundle.get('latency_similarity', 0.0)
+            throughput_similarity_penalty += feature_bundle.get('throughput_similarity', 0.0)
+            centralization_penalty += feature_bundle.get('centralization_penalty', 0.0)
+            pairwise_risk_term += feature_bundle.get('total_penalty', 0.0)
+
+        cardinality_penalty = constraint_penalty * ((len(normalized_indices) - committee_k) ** 2)
+        total_objective = score_term + pairwise_risk_term + cardinality_penalty
+
+        return {
+            'selected_count': float(len(normalized_indices)),
+            'score_reward': score_reward,
+            'score_term': score_term,
+            'pairwise_risk_term': pairwise_risk_term,
+            'infrastructure_penalty': infrastructure_penalty,
+            'uptime_correlation_penalty': uptime_correlation_penalty,
+            'latency_similarity_penalty': latency_similarity_penalty,
+            'throughput_similarity_penalty': throughput_similarity_penalty,
+            'centralization_penalty': centralization_penalty,
+            'cardinality_penalty': cardinality_penalty,
+            'total_objective': total_objective,
+        }
+
+    def evaluate_committee_selection(
+        self,
+        vrf_output: str,
+        committee_nodes: List[str],
+        *,
+        candidate_nodes: Optional[List[str]] = None,
+        committee_k: int = 5,
+        coupling_weights: Optional[Dict[str, float]] = None,
+        constraint_penalty: Optional[float] = None,
+        effective_scores: Optional[Dict[str, float]] = None,
+        pairwise_features: Optional[Dict[Tuple[int, int], Dict[str, float]]] = None,
+    ) -> Dict[str, float]:
+        """Evaluate a committee under the current exact-k objective and return a breakdown."""
+        nodes = candidate_nodes if candidate_nodes is not None else list(self.nodes.keys())
+        if not nodes:
+            return {
+                'selected_count': 0.0,
+                'score_reward': 0.0,
+                'score_term': 0.0,
+                'pairwise_risk_term': 0.0,
+                'infrastructure_penalty': 0.0,
+                'uptime_correlation_penalty': 0.0,
+                'latency_similarity_penalty': 0.0,
+                'throughput_similarity_penalty': 0.0,
+                'centralization_penalty': 0.0,
+                'cardinality_penalty': 0.0,
+                'total_objective': 0.0,
+            }
+
+        penalty = constraint_penalty if constraint_penalty is not None else self.penalty_coefficient
+        if effective_scores is None or pairwise_features is None:
+            (
+                _,
+                _,
+                _,
+                effective_scores,
+                pairwise_features,
+            ) = self.formulate_committee_qubo_problem(
+                vrf_output,
+                nodes,
+                committee_k=committee_k,
+                coupling_weights=coupling_weights,
+                constraint_penalty=penalty,
+            )
+
+        node_to_index = {node_id: index for index, node_id in enumerate(nodes)}
+        selected_indices = [node_to_index[node_id] for node_id in committee_nodes if node_id in node_to_index]
+        return self._committee_objective_breakdown_from_indices(
+            selected_indices,
+            nodes,
+            committee_k,
+            effective_scores,
+            pairwise_features,
+            penalty,
+        )
+
+    def _qubo_energy(
+        self,
+        selected_indices: List[int],
+        linear_coefficients: Dict[int, float],
+        quadratic_coefficients: Dict[Tuple[int, int], float],
+    ) -> float:
+        """Evaluate a QUBO assignment represented by selected variable indices."""
+        selected_set = set(selected_indices)
+        energy = sum(linear_coefficients.get(index, 0.0) for index in selected_set)
+        for (i, j), coefficient in quadratic_coefficients.items():
+            if i in selected_set and j in selected_set:
+                energy += coefficient
+        return energy
+
+    def _repair_committee_selection(
+        self,
+        selected_indices: List[int],
+        candidate_nodes: List[str],
+        committee_k: int,
+        linear_coefficients: Dict[int, float],
+        quadratic_coefficients: Dict[Tuple[int, int], float],
+        effective_scores: Dict[str, float],
+    ) -> List[int]:
+        """Repair non-exact-k annealer outputs by greedily minimizing the committee QUBO energy."""
+        selected = set(selected_indices)
+
+        while len(selected) > committee_k:
+            removal_candidates = []
+            for index in selected:
+                repaired = sorted(selected - {index})
+                energy = self._qubo_energy(repaired, linear_coefficients, quadratic_coefficients)
+                removal_candidates.append((energy, -effective_scores[candidate_nodes[index]], index))
+            _, _, remove_index = min(removal_candidates)
+            selected.remove(remove_index)
+
+        while len(selected) < committee_k:
+            addition_candidates = []
+            for index in range(len(candidate_nodes)):
+                if index in selected:
+                    continue
+                repaired = sorted(selected | {index})
+                energy = self._qubo_energy(repaired, linear_coefficients, quadratic_coefficients)
+                addition_candidates.append((energy, -effective_scores[candidate_nodes[index]], index))
+            if not addition_candidates:
+                break
+            _, _, add_index = min(addition_candidates)
+            selected.add(add_index)
+
+        return sorted(selected)
+
+    def derive_primary_leader(
+        self,
+        committee_nodes: List[str],
+        vrf_output: str,
+        *,
+        effective_scores: Optional[Dict[str, float]] = None,
+        policy: str = 'highest_score',
+    ) -> Optional[str]:
+        """Reduce a committee to a deterministic primary leader for compatibility with single-leader flows."""
+        if not committee_nodes:
+            return None
+
+        if policy == 'vrf_hash':
+            return min(
+                committee_nodes,
+                key=lambda node_id: hashlib.sha256(
+                    f"{vrf_output}:{self.nodes.get(node_id, {}).get('public_key', node_id)}".encode()
+                ).hexdigest(),
+            )
+
+        score_lookup = effective_scores or {
+            node_id: self.calculate_effective_score(node_id, vrf_output)
+            for node_id in committee_nodes
+        }
+        return max(committee_nodes, key=lambda node_id: (score_lookup.get(node_id, float('-inf')), node_id))
+
+    def select_committee(
+        self,
+        vrf_output: str,
+        candidate_nodes: Optional[List[str]] = None,
+        committee_k: int = 5,
+        coupling_weights: Optional[Dict[str, float]] = None,
+        primary_leader_policy: str = 'highest_score',
+    ) -> CommitteeSelectionResult:
+        """Select an exact-k committee and derive one deterministic primary leader."""
+        nodes = candidate_nodes if candidate_nodes is not None else list(self.nodes.keys())
+        if not nodes:
+            return CommitteeSelectionResult([], None, {}, {}, 0.0, used_fallback=True)
+
+        committee_k = max(1, min(committee_k, len(nodes)))
+        (
+            linear_coefficients,
+            quadratic_coefficients,
+            _,
+            effective_scores,
+            pairwise_features,
+        ) = self.formulate_committee_qubo_problem(
+            vrf_output,
+            nodes,
+            committee_k=committee_k,
+            coupling_weights=coupling_weights,
+        )
+
+        solver_start = time.time()
+        solution = self.simulate_quantum_annealer(
+            linear_coefficients,
+            quadratic_coefficients,
+            nodes,
+            exact_selection_count=committee_k,
+        )
+        solver_time_ms = (time.time() - solver_start) * 1000.0
+
+        selected_indices = [index for index, selected in enumerate(solution) if selected == 1 and index < len(nodes)]
+        raw_committee_nodes = [nodes[index] for index in selected_indices]
+        raw_objective_breakdown = self._committee_objective_breakdown_from_indices(
+            selected_indices,
+            nodes,
+            committee_k,
+            effective_scores,
+            pairwise_features,
+            self.penalty_coefficient,
+        )
+        used_fallback = len(selected_indices) != committee_k
+        fallback_reason = None
+        if used_fallback and self.ablation.use_committee_fallback:
+            fallback_reason = 'exact_selection_count_mismatch'
+            selected_indices = self._repair_committee_selection(
+                selected_indices,
+                nodes,
+                committee_k,
+                linear_coefficients,
+                quadratic_coefficients,
+                effective_scores,
+            )
+        elif used_fallback:
+            fallback_reason = 'fallback_disabled'
+
+        committee_nodes = [nodes[index] for index in selected_indices]
+        objective_breakdown = self._committee_objective_breakdown_from_indices(
+            selected_indices,
+            nodes,
+            committee_k,
+            effective_scores,
+            pairwise_features,
+            self.penalty_coefficient,
+        )
+        primary_leader = self.derive_primary_leader(
+            committee_nodes,
+            vrf_output,
+            effective_scores=effective_scores,
+            policy=primary_leader_policy,
+        )
+
+        serializable_pairwise = {}
+        for (i, j), feature_bundle in pairwise_features.items():
+            serializable_pairwise[f"{nodes[i]}::{nodes[j]}"] = feature_bundle
+
+        return CommitteeSelectionResult(
+            committee_nodes=committee_nodes,
+            primary_leader=primary_leader,
+            effective_scores={node_id: effective_scores[node_id] for node_id in committee_nodes},
+            pairwise_features=serializable_pairwise,
+            solver_time_ms=solver_time_ms,
+            used_fallback=used_fallback,
+            candidate_count=len(nodes),
+            raw_committee_nodes=raw_committee_nodes,
+            objective_value=objective_breakdown['total_objective'],
+            raw_objective_value=raw_objective_breakdown['total_objective'],
+            objective_breakdown=objective_breakdown,
+            raw_objective_breakdown=raw_objective_breakdown,
+            fallback_reason=fallback_reason,
+        )
+
+    def select_committee_exact(
+        self,
+        vrf_output: str,
+        candidate_nodes: Optional[List[str]] = None,
+        committee_k: int = 5,
+        coupling_weights: Optional[Dict[str, float]] = None,
+        primary_leader_policy: str = 'highest_score',
+        max_exact_candidates: int = 18,
+    ) -> CommitteeSelectionResult:
+        """Select the optimal exact-k committee by brute-force enumeration on small candidate sets."""
+        nodes = candidate_nodes if candidate_nodes is not None else list(self.nodes.keys())
+        if not nodes:
+            return CommitteeSelectionResult([], None, {}, {}, 0.0, used_fallback=True)
+
+        if len(nodes) > max_exact_candidates:
+            raise ValueError(
+                f"Exact committee enumeration is limited to {max_exact_candidates} candidates, got {len(nodes)}"
+            )
+
+        committee_k = max(1, min(committee_k, len(nodes)))
+        (
+            _,
+            _,
+            _,
+            effective_scores,
+            pairwise_features,
+        ) = self.formulate_committee_qubo_problem(
+            vrf_output,
+            nodes,
+            committee_k=committee_k,
+            coupling_weights=coupling_weights,
+        )
+
+        solver_start = time.time()
+        best_indices: Optional[List[int]] = None
+        best_breakdown: Optional[Dict[str, float]] = None
+
+        for combination_indices in combinations(range(len(nodes)), committee_k):
+            breakdown = self._committee_objective_breakdown_from_indices(
+                list(combination_indices),
+                nodes,
+                committee_k,
+                effective_scores,
+                pairwise_features,
+                self.penalty_coefficient,
+            )
+            comparison_key = (
+                breakdown['total_objective'],
+                tuple(-effective_scores[nodes[index]] for index in combination_indices),
+                tuple(nodes[index] for index in combination_indices),
+            )
+            if best_indices is None or comparison_key < (
+                best_breakdown['total_objective'],
+                tuple(-effective_scores[nodes[index]] for index in best_indices),
+                tuple(nodes[index] for index in best_indices),
+            ):
+                best_indices = list(combination_indices)
+                best_breakdown = breakdown
+
+        solver_time_ms = (time.time() - solver_start) * 1000.0
+        if best_indices is None or best_breakdown is None:
+            return CommitteeSelectionResult([], None, {}, {}, solver_time_ms, used_fallback=True)
+
+        committee_nodes = [nodes[index] for index in best_indices]
+        primary_leader = self.derive_primary_leader(
+            committee_nodes,
+            vrf_output,
+            effective_scores=effective_scores,
+            policy=primary_leader_policy,
+        )
+
+        serializable_pairwise = {}
+        for (i, j), feature_bundle in pairwise_features.items():
+            serializable_pairwise[f"{nodes[i]}::{nodes[j]}"] = feature_bundle
+
+        return CommitteeSelectionResult(
+            committee_nodes=committee_nodes,
+            primary_leader=primary_leader,
+            effective_scores={node_id: effective_scores[node_id] for node_id in committee_nodes},
+            pairwise_features=serializable_pairwise,
+            solver_time_ms=solver_time_ms,
+            used_fallback=False,
+            candidate_count=len(nodes),
+            raw_committee_nodes=list(committee_nodes),
+            objective_value=best_breakdown['total_objective'],
+            raw_objective_value=best_breakdown['total_objective'],
+            objective_breakdown=dict(best_breakdown),
+            raw_objective_breakdown=dict(best_breakdown),
+            fallback_reason=None,
+        )
+
     def formulate_qubo_problem(self, vrf_output: str, candidate_nodes: List[str] = None) -> Tuple[Dict, Dict, float]:
         """
         Formulate QUBO problem for representative node selection.
@@ -2624,7 +3353,13 @@ class QuantumAnnealingConsensus:
         
         return linear_coefficients, quadratic_coefficients, constant_offset
 
-    def simulate_quantum_annealer(self, linear_coeff: Dict, quadratic_coeff: Dict, candidate_nodes: List[str] = None) -> List[int]:
+    def simulate_quantum_annealer(
+        self,
+        linear_coeff: Dict,
+        quadratic_coeff: Dict,
+        candidate_nodes: List[str] = None,
+        exact_selection_count: int = 1,
+    ) -> List[int]:
         """
         Simulate quantum annealer solving QUBO problem using D-Wave Ocean SDK.
         
@@ -2651,15 +3386,13 @@ class QuantumAnnealingConsensus:
 
         # Ablation: bypass QUBO solver and use direct argmax instead
         if not self.ablation.use_qubo_solver:
-            best_idx = 0
-            best_score = float("-inf")
-            for i in range(n):
-                score = -linear_coeff.get(i, 0.0) - self.penalty_coefficient
-                if score > best_score:
-                    best_score = score
-                    best_idx = i
             solution = [0] * n
-            solution[best_idx] = 1
+            ranked_indices = sorted(
+                range(n),
+                key=lambda idx: (-linear_coeff.get(idx, 0.0), idx),
+            )
+            for index in ranked_indices[:max(1, min(exact_selection_count, n))]:
+                solution[index] = 1
             return solution
 
         try:
@@ -2715,8 +3448,12 @@ class QuantumAnnealingConsensus:
             solution_time = time.time() - solution_start
             print(f"    📊 Solution extraction: {solution_time * 1000:.3f}ms (energy={best_energy:.3f})")
             
-            # Validate solution (should select exactly one node for our constraint)
+            # Validate solution (single-leader and committee modes share this sampler)
             selected_count = sum(solution)
+
+            if exact_selection_count != 1:
+                print(f"    ✅ Committee solution candidate: selected {selected_count}/{exact_selection_count} nodes")
+                return solution
             
             if selected_count == 1:
                 # Perfect solution found
@@ -2754,6 +3491,16 @@ class QuantumAnnealingConsensus:
                 
         except Exception as e:
             print(f"⚠️  D-Wave simulator error: {e}, using classical fallback")
+
+            if exact_selection_count != 1:
+                solution = [0] * n
+                ranked_indices = sorted(
+                    range(n),
+                    key=lambda idx: (-linear_coeff.get(idx, 0.0), idx),
+                )
+                for index in ranked_indices[:max(1, min(exact_selection_count, n))]:
+                    solution[index] = 1
+                return solution
             
             # Classical fallback: evaluate all single-node selections
             best_energy = float('inf')

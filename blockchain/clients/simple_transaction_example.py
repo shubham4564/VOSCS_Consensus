@@ -308,10 +308,10 @@ def main():
     elif final_pool and final_pool > initial_pool:
         print("   ⏳ Transaction in pool - waiting for block creation")
     else:
-        print("   ℹ️ Check leader selection: python tools/leader_monitor.py --once")
+        print("   ℹ️ Check leader selection: python tools/operational_support/leader_monitor.py --once")
     
     print("\n📋 Next Steps:")
-    print("   • Monitor leaders: python tools/leader_monitor.py")
+    print("   • Monitor leaders: python tools/operational_support/leader_monitor.py")
     print("   • View logs: tail -f logs/node1.log")
     print("   • Check health: curl http://localhost:11000/api/v1/health/")
     print("   • Run more tests: python clients/test_sample_transaction.py --count 10 --performance")

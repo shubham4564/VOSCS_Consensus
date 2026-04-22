@@ -2,7 +2,7 @@
 """Security Experiments
 ======================
 
-Three targeted security experiments for the quantum annealing consensus
+Six targeted security experiments for the quantum annealing consensus
 mechanism:
 
 1. Probe Manipulation Attack
@@ -20,6 +20,18 @@ mechanism:
    Tracks how many rounds until even the best honest node is rotated out.
    Verifies the empirical bound against the theoretical bound from Theorem 2
    and measures the effect of varying w_freq.
+
+4. Attacker-Fraction Sweep
+    Sweeps Byzantine fraction and compares committee capture, committee-seat
+    share, and missed-slot behavior under committee-aware selection.
+
+5. Correlated-Failure Resilience
+    Concentrates strong nodes in a shared failure domain and measures primary
+    disruption, surviving seat ratio, and full-committee failure exposure.
+
+6. Block-Withholding Fallback Recovery
+    Lets attacker-selected committee members withhold blocks and measures
+    fallback activation, recovery latency, and missed-slot behavior.
 """
 
 import hashlib
@@ -32,7 +44,7 @@ import sys
 import time
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -60,18 +72,77 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # type: ignore
 
 from blockchain.quantum_consensus import QuantumAnnealingConsensus
-from blockchain.quantum_consensus.quantum_annealing_consensus import AblationConfig  # type: ignore
+from blockchain.quantum_consensus.quantum_annealing_consensus import AblationConfig, CommitteeSelectionResult  # type: ignore
+from blockchain.utils.result_layout import create_run_layout, write_run_metadata
+from tools.evaluation_overhaul import (
+    LITERATURE_COMMITTEE_STRATEGIES,
+    SimulationConfig,
+    _select_committee_composite_greedy,
+    _select_committee_exact,
+    _select_committee_fairness_only,
+    _select_committee_greedy,
+    _select_committee_quantum,
+    _select_committee_reputation,
+    _select_committee_uniform,
+    _select_committee_vrf_stake,
+    _select_committee_weighted,
+    run_simulation,
+)
+from tools.visualize_findings import generate_findings_bundle
 
 
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
 
+
+def _refresh_live_findings_dashboard(output_dir: str) -> None:
+    try:
+        result = generate_findings_bundle(search_root=output_dir, output_dir=output_dir)
+        print(f"  live findings dashboard refreshed: {result['live_dashboard_path']}")
+    except Exception as exc:
+        print(f"  warning: could not refresh live findings dashboard: {exc}")
+
+
+def _synthesise_security_metadata(node_index: int, attacker: bool, metadata_profile: str) -> Dict[str, Any]:
+    """Create deterministic infrastructure metadata for committee-aware security studies."""
+    providers = ["aws", "gcp", "azure", "self_hosted"]
+    regions = ["us-west-2", "us-east-1", "eu-central-1", "ap-south-1"]
+    countries = ["US", "US", "DE", "IN"]
+    datacenter_codes = ["pdx1", "iad1", "fra1", "bom1"]
+
+    provider_idx = node_index % len(providers)
+    region_idx = (node_index // len(providers)) % len(regions)
+    if metadata_profile == "clustered_attackers" and attacker:
+        provider_idx = 0
+        region_idx = 1
+
+    return {
+        "asn": 64512 + (provider_idx * 100) + region_idx,
+        "cloud_provider": providers[provider_idx],
+        "region": regions[region_idx],
+        "datacenter": datacenter_codes[region_idx],
+        "country_code": countries[region_idx],
+        "operator_id": f"{'attacker' if attacker else 'operator'}_{node_index % 8}",
+        "failure_domain": f"{providers[provider_idx]}:{regions[region_idx]}",
+        "metadata_source": "security_experiment",
+    }
+
+
+def _p95(values: List[float]) -> float:
+    if not values:
+        return 0.0
+    if len(values) == 1:
+        return values[0]
+    return statistics.quantiles(values, n=100, method="inclusive")[94]
+
 def _build_consensus(
     num_nodes: int,
     seed: int,
     attacker_fraction: float = 0.2,
     ablation: Optional[AblationConfig] = None,
+    metadata_profile: str = "synthetic_static",
+    concentrate_top_nodes_count: int = 0,
 ) -> Tuple[
     QuantumAnnealingConsensus,
     List[str],
@@ -97,7 +168,7 @@ def _build_consensus(
     num_attackers = max(1, int(num_nodes * attacker_fraction))
     attacker_ids = {f"node_{i}" for i in range(num_attackers)}
 
-    now = time.time()
+    node_specs: List[Tuple[str, bool, float]] = []
     for i in range(num_nodes):
         node_id = f"node_{i}"
         node_ids.append(node_id)
@@ -109,18 +180,226 @@ def _build_consensus(
         else:
             cap = min(1.0, cap + rng.uniform(0.0, 0.2))
         ground_truth[node_id] = cap
+        node_specs.append((node_id, attacker, cap))
+
+    concentrated_nodes = set()
+    if concentrate_top_nodes_count > 0:
+        concentrated_nodes = {
+            node_id
+            for node_id, _ in sorted(ground_truth.items(), key=lambda item: item[1], reverse=True)[:concentrate_top_nodes_count]
+        }
+
+    now = time.time()
+    for index, (node_id, attacker, cap) in enumerate(node_specs):
+        metadata = _synthesise_security_metadata(index, attacker, metadata_profile)
+        if node_id in concentrated_nodes:
+            metadata.update(
+                {
+                    "asn": 64513,
+                    "cloud_provider": "aws",
+                    "region": "us-east-1",
+                    "datacenter": "iad1",
+                    "country_code": "US",
+                    "operator_id": f"concentrated_{index % 4}",
+                    "failure_domain": "aws:us-east-1",
+                }
+            )
 
         pub, _ = consensus.ensure_node_keys(node_id)
-        consensus.register_node(node_id, pub)
-        # Initialise metrics
+        consensus.register_node(node_id, pub, metadata=metadata)
+        consensus.nodes[node_id]["stake_weight"] = max(0.1, cap * rng.uniform(5.0, 15.0))
         consensus.nodes[node_id]["latency"] = max(0.001, 0.15 - 0.10 * cap + rng.uniform(-0.02, 0.02))
         consensus.nodes[node_id]["throughput"] = max(1.0, 5.0 + 45.0 * cap * rng.uniform(0.8, 1.2))
         consensus.nodes[node_id]["last_seen"] = now
         consensus.nodes[node_id]["proposal_success_count"] = int(10 * cap)
         consensus.nodes[node_id]["proposal_failure_count"] = int(3 * (1.0 - cap))
+        consensus.append_committee_observation(
+            node_id,
+            uptime_sample=1,
+            latency_sample=consensus.nodes[node_id]["latency"],
+            throughput_sample=consensus.nodes[node_id]["throughput"],
+            anchor_id="bootstrap",
+        )
 
     consensus.node_performance_cache.clear()
+    consensus.committee_feature_cache.clear()
     return consensus, node_ids, ground_truth, is_attacker
+
+
+def _refresh_committee_metrics(
+    consensus: QuantumAnnealingConsensus,
+    node_ids: List[str],
+    ground_truth: Dict[str, float],
+    is_attacker: Dict[str, bool],
+    rng: random.Random,
+    *,
+    round_idx: int,
+    attacker_hardware_multiplier: float = 1.0,
+) -> None:
+    """Refresh synthetic per-round metrics and update rolling committee observations."""
+    now = time.time()
+    anchor_id = f"security_round_{round_idx % 8}"
+
+    for node_id in node_ids:
+        cap = ground_truth[node_id]
+        base_latency = max(0.001, 0.15 - 0.10 * cap + rng.uniform(-0.01, 0.01))
+        base_throughput = max(1.0, 5.0 + 45.0 * cap * rng.uniform(0.85, 1.15))
+
+        if is_attacker.get(node_id, False) and attacker_hardware_multiplier != 1.0:
+            base_latency = max(0.001, base_latency / attacker_hardware_multiplier)
+            base_throughput *= attacker_hardware_multiplier
+
+        consensus.nodes[node_id]["latency"] = base_latency
+        consensus.nodes[node_id]["throughput"] = base_throughput
+        consensus.nodes[node_id]["last_seen"] = now
+        consensus.append_committee_observation(
+            node_id,
+            uptime_sample=1,
+            latency_sample=base_latency,
+            throughput_sample=base_throughput,
+            anchor_id=anchor_id,
+        )
+
+    consensus.node_performance_cache.clear()
+    consensus.committee_feature_cache.clear()
+
+
+def _serialize_pairwise_features(
+    candidate_nodes: List[str],
+    pairwise_features: Dict[Tuple[int, int], Dict[str, float]],
+) -> Dict[str, Dict[str, float]]:
+    serializable_pairwise = {}
+    for (i, j), feature_bundle in pairwise_features.items():
+        serializable_pairwise[f"{candidate_nodes[i]}::{candidate_nodes[j]}"] = feature_bundle
+    return serializable_pairwise
+
+
+def _resolve_security_committee_strategies(
+    strategies: Optional[List[str]],
+    *,
+    num_nodes: int,
+    include_exact_when_safe: bool = False,
+) -> List[str]:
+    """Resolve committee strategies for security experiments."""
+    resolved = list(strategies) if strategies is not None else list(LITERATURE_COMMITTEE_STRATEGIES)
+    if include_exact_when_safe and num_nodes <= 16 and "committee_exact" not in resolved:
+        resolved.append("committee_exact")
+    return resolved
+
+
+def _select_committee_strategy(
+    consensus: QuantumAnnealingConsensus,
+    strategy: str,
+    candidate_nodes: List[str],
+    vrf_output: str,
+    committee_k: int,
+    primary_leader_policy: str = "highest_score",
+) -> CommitteeSelectionResult:
+    """Local committee selector helper for security studies."""
+    selector_map = {
+        "committee_quantum": _select_committee_quantum,
+        "committee_greedy": _select_committee_greedy,
+        "committee_weighted": _select_committee_weighted,
+        "committee_uniform": _select_committee_uniform,
+        "committee_vrf_stake": _select_committee_vrf_stake,
+        "committee_reputation": _select_committee_reputation,
+        "committee_composite_greedy": _select_committee_composite_greedy,
+        "committee_fairness_only": _select_committee_fairness_only,
+    }
+
+    if strategy == "committee_exact":
+        return _select_committee_exact(
+            consensus,
+            candidate_nodes,
+            vrf_output,
+            committee_k,
+            primary_leader_policy,
+            max_exact_candidates=16,
+        )
+
+    if strategy in selector_map:
+        return selector_map[strategy](
+            consensus,
+            candidate_nodes,
+            vrf_output,
+            committee_k,
+            primary_leader_policy,
+        )
+
+    raise ValueError(f"Unsupported committee strategy: {strategy!r}")
+
+
+def _failure_domain(consensus: QuantumAnnealingConsensus, node_id: str) -> str:
+    return consensus.nodes.get(node_id, {}).get("committee_metadata", {}).get("failure_domain", "unknown")
+
+
+def _record_committee_round(
+    consensus: QuantumAnnealingConsensus,
+    committee_nodes: List[str],
+    *,
+    round_idx: int,
+    selected_leader: Optional[str],
+    failed_nodes: Optional[List[str]] = None,
+) -> None:
+    failed_set = set(failed_nodes or [])
+    for node_id in committee_nodes:
+        node_state = consensus.nodes.get(node_id)
+        if not node_state:
+            continue
+        node_state["committee_selection_count"] = node_state.get("committee_selection_count", 0) + 1
+        node_state["last_committee_epoch"] = round_idx
+
+    for node_id in failed_set:
+        if node_id in consensus.nodes:
+            consensus.nodes[node_id]["proposal_failure_count"] += 1
+
+    if selected_leader and selected_leader in consensus.nodes:
+        consensus.nodes[selected_leader]["proposal_success_count"] += 1
+        consensus.record_leader_selection(len(consensus.selection_history), selected_leader)
+
+    consensus.node_performance_cache.clear()
+    consensus.committee_feature_cache.clear()
+
+
+@dataclass
+class CorrelatedFailureResult:
+    strategy: str
+    outage_probability: float
+    mean_unique_failure_domain_ratio: float
+    mean_surviving_seat_ratio: float
+    primary_disruption_rate: float
+    recovery_success_rate: float
+    full_committee_failure_rate: float
+    missed_slot_rate: float
+    n_rounds: int
+
+
+@dataclass
+class AttackerFractionSweepResult:
+    strategy: str
+    attacker_fraction: float
+    attacker_proposer_share: float
+    attacker_committee_share: float
+    committee_constraint_violation_rate: float
+    missed_slot_rate: float
+    p95_block_time_ms: float
+    mean_solver_ms: float
+    n_rounds: int
+
+
+@dataclass
+class BlockWithholdingResult:
+    strategy: str
+    withholding_probability: float
+    fallback_activation_rate: float
+    fallback_success_rate: float
+    mean_recovery_latency_ms: float
+    p95_recovery_latency_ms: float
+    attacker_primary_share_initial: float
+    attacker_primary_share_final: float
+    final_attacker_proposer_share: float
+    missed_slot_rate: float
+    n_rounds: int
 
 
 def _select_argmax(
@@ -526,6 +805,437 @@ def _plot_score_racing(results: List[ScoreRacingResult], output_dir: str) -> Non
 
 
 # ---------------------------------------------------------------------------
+# Experiment 4 – Attacker-Fraction Sweep
+# ---------------------------------------------------------------------------
+
+def run_attacker_fraction_sweep_experiment(
+    num_nodes: int = 60,
+    num_rounds: int = 500,
+    attacker_fractions: Optional[List[float]] = None,
+    strategies: Optional[List[str]] = None,
+    committee_k: int = 5,
+    metadata_profile: str = "clustered_attackers",
+    include_exact_when_safe: bool = False,
+    seed: int = 29,
+    output_dir: str = "reports",
+) -> List[AttackerFractionSweepResult]:
+    """Sweep attacker fraction and compare proposer and committee capture across strategies."""
+    if attacker_fractions is None:
+        attacker_fractions = [0.0, 0.1, 0.2, 0.33, 0.4, 0.49]
+    strategies = _resolve_security_committee_strategies(
+        strategies,
+        num_nodes=num_nodes,
+        include_exact_when_safe=include_exact_when_safe,
+    )
+
+    results: List[AttackerFractionSweepResult] = []
+
+    print("\n" + "=" * 65)
+    print("  EXPERIMENT 4: Attacker-Fraction Sweep")
+    print(f"  nodes={num_nodes}  rounds={num_rounds}  metadata_profile={metadata_profile}")
+    print("=" * 65)
+
+    for attacker_fraction in attacker_fractions:
+        cfg = SimulationConfig(
+            num_nodes=num_nodes,
+            num_rounds=num_rounds,
+            attacker_fraction=attacker_fraction,
+            committee_k=committee_k,
+            metadata_profile=metadata_profile,
+            seed=seed,
+            output_dir=output_dir,
+        )
+        for strategy in strategies:
+            metrics = run_simulation(cfg, strategy, verbose=False)
+            results.append(
+                AttackerFractionSweepResult(
+                    strategy=strategy,
+                    attacker_fraction=attacker_fraction,
+                    attacker_proposer_share=metrics.attacker_share,
+                    attacker_committee_share=metrics.committee_attacker_seat_share,
+                    committee_constraint_violation_rate=metrics.committee_constraint_violation_rate,
+                    missed_slot_rate=metrics.missed_slot_rate,
+                    p95_block_time_ms=metrics.p95_block_time_ms,
+                    mean_solver_ms=metrics.mean_solver_ms,
+                    n_rounds=num_rounds,
+                )
+            )
+            print(
+                f"  fraction={attacker_fraction:.2f}  strategy={strategy:18s}  proposer={metrics.attacker_share:.3f}  "
+                f"committee={metrics.committee_attacker_seat_share:.3f}  missed={metrics.missed_slot_rate:.3f}"
+            )
+
+    _plot_attacker_fraction_sweep(results, output_dir)
+    return results
+
+
+def _plot_attacker_fraction_sweep(results: List[AttackerFractionSweepResult], output_dir: str) -> None:
+    if not results:
+        return
+
+    os.makedirs(output_dir, exist_ok=True)
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    strategies = sorted(set(r.strategy for r in results))
+    grouped = {strategy: sorted([r for r in results if r.strategy == strategy], key=lambda item: item.attacker_fraction) for strategy in strategies}
+
+    fig, axes = plt.subplots(2, 2, figsize=(12, 9), sharex=True)
+    for strategy, items in grouped.items():
+        xs = [item.attacker_fraction for item in items]
+        axes[0][0].plot(xs, [item.attacker_proposer_share for item in items], marker="o", label=strategy)
+        axes[0][1].plot(xs, [item.attacker_committee_share for item in items], marker="o", label=strategy)
+        axes[1][0].plot(xs, [item.missed_slot_rate for item in items], marker="o", label=strategy)
+        axes[1][1].plot(xs, [item.p95_block_time_ms for item in items], marker="o", label=strategy)
+
+    axes[0][0].set_title("Attacker proposer share")
+    axes[0][1].set_title("Attacker committee share")
+    axes[1][0].set_title("Missed-slot rate")
+    axes[1][1].set_title("P95 block time")
+    axes[0][0].set_ylabel("Rate")
+    axes[0][1].set_ylabel("Rate")
+    axes[1][0].set_ylabel("Rate")
+    axes[1][1].set_ylabel("Milliseconds")
+    axes[1][0].set_xlabel("Attacker fraction")
+    axes[1][1].set_xlabel("Attacker fraction")
+
+    for row in axes:
+        for ax in row:
+            ax.grid(True, linestyle="--", alpha=0.4)
+            ax.legend()
+
+    plt.tight_layout()
+    path = os.path.join(output_dir, f"security_attacker_sweep_{ts}.png")
+    plt.savefig(path)
+    plt.close(fig)
+
+    committee_only = [strategy for strategy in strategies if any(item.attacker_committee_share > 0.0 or "committee" in strategy for item in grouped[strategy])]
+    if committee_only:
+        fig, ax = plt.subplots(figsize=(10, 5))
+        for strategy in committee_only:
+            items = grouped[strategy]
+            xs = [item.attacker_fraction for item in items]
+            ax.plot(xs, [item.committee_constraint_violation_rate for item in items], marker="o", label=f"{strategy} violation")
+            ax.plot(xs, [item.mean_solver_ms for item in items], marker="s", linestyle="--", label=f"{strategy} solver ms")
+        ax.set_xlabel("Attacker fraction")
+        ax.set_ylabel("Rate / milliseconds")
+        ax.set_title("Committee robustness and overhead vs attacker fraction")
+        ax.grid(True, linestyle="--", alpha=0.4)
+        ax.legend()
+        plt.tight_layout()
+        path = os.path.join(output_dir, f"security_attacker_sweep_overhead_{ts}.png")
+        plt.savefig(path)
+        plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# Experiment 5 – Correlated-Failure Resilience
+# ---------------------------------------------------------------------------
+
+def run_correlated_failure_experiment(
+    num_nodes: int = 40,
+    num_rounds: int = 500,
+    outage_probabilities: Optional[List[float]] = None,
+    strategies: Optional[List[str]] = None,
+    committee_k: int = 5,
+    attacker_fraction: float = 0.2,
+    concentrated_top_nodes: int = 12,
+    include_exact_when_safe: bool = False,
+    seed: int = 31,
+    output_dir: str = "reports",
+) -> List[CorrelatedFailureResult]:
+    """Concentrate high-scoring nodes in one failure domain and measure outage resilience."""
+    if outage_probabilities is None:
+        outage_probabilities = [0.1, 0.25, 0.5]
+    strategies = _resolve_security_committee_strategies(
+        strategies,
+        num_nodes=num_nodes,
+        include_exact_when_safe=include_exact_when_safe,
+    )
+
+    results: List[CorrelatedFailureResult] = []
+
+    print("\n" + "=" * 65)
+    print("  EXPERIMENT 5: Correlated-Failure Resilience")
+    print(f"  nodes={num_nodes}  rounds={num_rounds}  concentrated_top_nodes={concentrated_top_nodes}")
+    print("=" * 65)
+
+    for outage_probability in outage_probabilities:
+        for strategy in strategies:
+            consensus, node_ids, ground_truth, is_attacker = _build_consensus(
+                num_nodes,
+                seed + int(outage_probability * 1000),
+                attacker_fraction=attacker_fraction,
+                metadata_profile="synthetic_static",
+                concentrate_top_nodes_count=min(concentrated_top_nodes, num_nodes),
+            )
+            rng = random.Random(seed + int(outage_probability * 1000) + len(strategy))
+
+            unique_failure_ratios: List[float] = []
+            surviving_seat_ratios: List[float] = []
+            primary_disruptions = 0
+            recovery_successes = 0
+            full_committee_failures = 0
+            missed_slots = 0
+
+            for rnd in range(num_rounds):
+                _refresh_committee_metrics(consensus, node_ids, ground_truth, is_attacker, rng, round_idx=rnd)
+                vrf = hashlib.sha256(f"correlated_failure_{strategy}_{outage_probability}_{rnd}_{seed}".encode()).hexdigest()
+                result = _select_committee_strategy(consensus, strategy, node_ids, vrf, committee_k)
+                committee_nodes = result.committee_nodes
+
+                unique_failure_ratios.append(
+                    len({_failure_domain(consensus, node_id) for node_id in committee_nodes}) / max(1, len(committee_nodes))
+                )
+
+                actual_leader = result.primary_leader
+                failed_nodes: List[str] = []
+                if rng.random() < outage_probability:
+                    failed_nodes = [node_id for node_id in committee_nodes if _failure_domain(consensus, node_id) == "aws:us-east-1"]
+                    surviving_nodes = [node_id for node_id in committee_nodes if node_id not in failed_nodes]
+                    surviving_seat_ratios.append(len(surviving_nodes) / max(1, len(committee_nodes)))
+                    if result.primary_leader in failed_nodes:
+                        primary_disruptions += 1
+                        if surviving_nodes:
+                            actual_leader = consensus.derive_primary_leader(surviving_nodes, vrf)
+                            recovery_successes += 1
+                        else:
+                            actual_leader = None
+                            full_committee_failures += 1
+                            missed_slots += 1
+                    elif not surviving_nodes:
+                        actual_leader = None
+                        full_committee_failures += 1
+                        missed_slots += 1
+                else:
+                    surviving_seat_ratios.append(1.0)
+
+                _record_committee_round(
+                    consensus,
+                    committee_nodes,
+                    round_idx=rnd,
+                    selected_leader=actual_leader,
+                    failed_nodes=failed_nodes,
+                )
+
+            results.append(
+                CorrelatedFailureResult(
+                    strategy=strategy,
+                    outage_probability=outage_probability,
+                    mean_unique_failure_domain_ratio=statistics.mean(unique_failure_ratios) if unique_failure_ratios else 0.0,
+                    mean_surviving_seat_ratio=statistics.mean(surviving_seat_ratios) if surviving_seat_ratios else 0.0,
+                    primary_disruption_rate=primary_disruptions / num_rounds,
+                    recovery_success_rate=recovery_successes / max(1, primary_disruptions),
+                    full_committee_failure_rate=full_committee_failures / num_rounds,
+                    missed_slot_rate=missed_slots / num_rounds,
+                    n_rounds=num_rounds,
+                )
+            )
+            print(
+                f"  outage={outage_probability:.2f}  strategy={strategy:18s}  disruption={primary_disruptions / num_rounds:.3f}  "
+                f"survival={statistics.mean(surviving_seat_ratios) if surviving_seat_ratios else 0.0:.3f}"
+            )
+
+    _plot_correlated_failure(results, output_dir)
+    return results
+
+
+def _plot_correlated_failure(results: List[CorrelatedFailureResult], output_dir: str) -> None:
+    if not results:
+        return
+
+    os.makedirs(output_dir, exist_ok=True)
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    strategies = sorted(set(r.strategy for r in results))
+    grouped = {strategy: sorted([r for r in results if r.strategy == strategy], key=lambda item: item.outage_probability) for strategy in strategies}
+
+    fig, axes = plt.subplots(2, 2, figsize=(12, 9), sharex=True)
+    for strategy, items in grouped.items():
+        xs = [item.outage_probability for item in items]
+        axes[0][0].plot(xs, [item.mean_unique_failure_domain_ratio for item in items], marker="o", label=strategy)
+        axes[0][1].plot(xs, [item.mean_surviving_seat_ratio for item in items], marker="o", label=strategy)
+        axes[1][0].plot(xs, [item.primary_disruption_rate for item in items], marker="o", label=strategy)
+        axes[1][1].plot(xs, [item.full_committee_failure_rate for item in items], marker="o", label=strategy)
+
+    axes[0][0].set_title("Committee diversity")
+    axes[0][1].set_title("Mean surviving seat ratio")
+    axes[1][0].set_title("Primary disruption rate")
+    axes[1][1].set_title("Full committee failure rate")
+    axes[0][0].set_ylabel("Ratio")
+    axes[0][1].set_ylabel("Ratio")
+    axes[1][0].set_ylabel("Rate")
+    axes[1][1].set_ylabel("Rate")
+    axes[1][0].set_xlabel("Outage probability")
+    axes[1][1].set_xlabel("Outage probability")
+
+    for row in axes:
+        for ax in row:
+            ax.grid(True, linestyle="--", alpha=0.4)
+            ax.legend()
+
+    plt.tight_layout()
+    path = os.path.join(output_dir, f"security_correlated_failure_{ts}.png")
+    plt.savefig(path)
+    plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# Experiment 6 – Block-Withholding and Fallback Recovery
+# ---------------------------------------------------------------------------
+
+def run_block_withholding_experiment(
+    num_nodes: int = 40,
+    num_rounds: int = 500,
+    withholding_probabilities: Optional[List[float]] = None,
+    strategies: Optional[List[str]] = None,
+    committee_k: int = 5,
+    attacker_fraction: float = 0.2,
+    attacker_hardware_multiplier: float = 1.6,
+    include_exact_when_safe: bool = False,
+    seed: int = 37,
+    output_dir: str = "reports",
+) -> List[BlockWithholdingResult]:
+    """Measure fallback activation and recovery when attacker-selected committee members withhold blocks."""
+    if withholding_probabilities is None:
+        withholding_probabilities = [0.1, 0.25, 0.5]
+    strategies = _resolve_security_committee_strategies(
+        strategies,
+        num_nodes=num_nodes,
+        include_exact_when_safe=include_exact_when_safe,
+    )
+
+    results: List[BlockWithholdingResult] = []
+
+    print("\n" + "=" * 65)
+    print("  EXPERIMENT 6: Block-Withholding Fallback")
+    print(f"  nodes={num_nodes}  rounds={num_rounds}  attacker_fraction={attacker_fraction}")
+    print("=" * 65)
+
+    for withholding_probability in withholding_probabilities:
+        for strategy in strategies:
+            consensus, node_ids, ground_truth, is_attacker = _build_consensus(
+                num_nodes,
+                seed + int(withholding_probability * 1000),
+                attacker_fraction=attacker_fraction,
+                metadata_profile="clustered_attackers",
+            )
+            rng = random.Random(seed + int(withholding_probability * 1000) + len(strategy))
+
+            fallback_activations = 0
+            fallback_successes = 0
+            recovery_latencies_ms: List[float] = []
+            primary_attacker_history: List[float] = []
+            final_attacker_history: List[float] = []
+            missed_slots = 0
+
+            for rnd in range(num_rounds):
+                _refresh_committee_metrics(
+                    consensus,
+                    node_ids,
+                    ground_truth,
+                    is_attacker,
+                    rng,
+                    round_idx=rnd,
+                    attacker_hardware_multiplier=attacker_hardware_multiplier,
+                )
+                vrf = hashlib.sha256(f"block_withholding_{strategy}_{withholding_probability}_{rnd}_{seed}".encode()).hexdigest()
+                result = _select_committee_strategy(consensus, strategy, node_ids, vrf, committee_k)
+                committee_nodes = result.committee_nodes
+                primary_leader = result.primary_leader
+                primary_attacker_history.append(1.0 if primary_leader and is_attacker.get(primary_leader, False) else 0.0)
+
+                withheld_nodes = [
+                    node_id
+                    for node_id in committee_nodes
+                    if is_attacker.get(node_id, False) and rng.random() < withholding_probability
+                ]
+
+                actual_leader = primary_leader
+                if primary_leader in withheld_nodes:
+                    fallback_activations += 1
+                    surviving_nodes = [node_id for node_id in committee_nodes if node_id not in withheld_nodes]
+                    if surviving_nodes:
+                        actual_leader = consensus.derive_primary_leader(surviving_nodes, vrf)
+                        fallback_successes += 1
+                        recovery_latencies_ms.append(25.0 + (15.0 * len(withheld_nodes)))
+                    else:
+                        actual_leader = None
+                        recovery_latencies_ms.append(250.0)
+                        missed_slots += 1
+
+                final_attacker_history.append(1.0 if actual_leader and is_attacker.get(actual_leader, False) else 0.0)
+                _record_committee_round(
+                    consensus,
+                    committee_nodes,
+                    round_idx=rnd,
+                    selected_leader=actual_leader,
+                    failed_nodes=withheld_nodes,
+                )
+
+            half = max(1, len(primary_attacker_history) // 2)
+            results.append(
+                BlockWithholdingResult(
+                    strategy=strategy,
+                    withholding_probability=withholding_probability,
+                    fallback_activation_rate=fallback_activations / num_rounds,
+                    fallback_success_rate=fallback_successes / max(1, fallback_activations),
+                    mean_recovery_latency_ms=statistics.mean(recovery_latencies_ms) if recovery_latencies_ms else 0.0,
+                    p95_recovery_latency_ms=_p95(recovery_latencies_ms),
+                    attacker_primary_share_initial=statistics.mean(primary_attacker_history[:half]) if primary_attacker_history[:half] else 0.0,
+                    attacker_primary_share_final=statistics.mean(primary_attacker_history[-half:]) if primary_attacker_history[-half:] else 0.0,
+                    final_attacker_proposer_share=statistics.mean(final_attacker_history) if final_attacker_history else 0.0,
+                    missed_slot_rate=missed_slots / num_rounds,
+                    n_rounds=num_rounds,
+                )
+            )
+            print(
+                f"  withhold={withholding_probability:.2f}  strategy={strategy:18s}  fallback={fallback_activations / num_rounds:.3f}  "
+                f"recover={fallback_successes / max(1, fallback_activations):.3f}"
+            )
+
+    _plot_block_withholding(results, output_dir)
+    return results
+
+
+def _plot_block_withholding(results: List[BlockWithholdingResult], output_dir: str) -> None:
+    if not results:
+        return
+
+    os.makedirs(output_dir, exist_ok=True)
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    strategies = sorted(set(r.strategy for r in results))
+    grouped = {strategy: sorted([r for r in results if r.strategy == strategy], key=lambda item: item.withholding_probability) for strategy in strategies}
+
+    fig, axes = plt.subplots(2, 2, figsize=(12, 9), sharex=True)
+    for strategy, items in grouped.items():
+        xs = [item.withholding_probability for item in items]
+        axes[0][0].plot(xs, [item.fallback_activation_rate for item in items], marker="o", label=strategy)
+        axes[0][1].plot(xs, [item.p95_recovery_latency_ms for item in items], marker="o", label=strategy)
+        axes[1][0].plot(xs, [item.attacker_primary_share_initial for item in items], marker="o", linestyle="--", label=f"{strategy} initial")
+        axes[1][0].plot(xs, [item.attacker_primary_share_final for item in items], marker="o", label=f"{strategy} final")
+        axes[1][1].plot(xs, [item.missed_slot_rate for item in items], marker="o", label=strategy)
+
+    axes[0][0].set_title("Fallback activation rate")
+    axes[0][1].set_title("P95 recovery latency")
+    axes[1][0].set_title("Attacker primary share before vs after penalties")
+    axes[1][1].set_title("Missed-slot rate")
+    axes[0][0].set_ylabel("Rate")
+    axes[0][1].set_ylabel("Milliseconds")
+    axes[1][0].set_ylabel("Rate")
+    axes[1][1].set_ylabel("Rate")
+    axes[1][0].set_xlabel("Withholding probability")
+    axes[1][1].set_xlabel("Withholding probability")
+
+    for row in axes:
+        for ax in row:
+            ax.grid(True, linestyle="--", alpha=0.4)
+            ax.legend()
+
+    plt.tight_layout()
+    path = os.path.join(output_dir, f"security_block_withholding_{ts}.png")
+    plt.savefig(path)
+    plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
 # JSON output
 # ---------------------------------------------------------------------------
 
@@ -533,6 +1243,9 @@ def save_security_results(
     probe_results: List[ProbeManipulationResult],
     infra_results: List[InfraGamingResult],
     racing_results: List[ScoreRacingResult],
+    correlated_failure_results: Optional[List[CorrelatedFailureResult]],
+    attacker_sweep_results: Optional[List[AttackerFractionSweepResult]],
+    block_withholding_results: Optional[List[BlockWithholdingResult]],
     output_dir: str,
 ) -> str:
     os.makedirs(output_dir, exist_ok=True)
@@ -572,6 +1285,50 @@ def save_security_results(
             }
             for r in racing_results
         ],
+        "correlated_failure": [
+            {
+                "strategy": r.strategy,
+                "outage_probability": r.outage_probability,
+                "mean_unique_failure_domain_ratio": r.mean_unique_failure_domain_ratio,
+                "mean_surviving_seat_ratio": r.mean_surviving_seat_ratio,
+                "primary_disruption_rate": r.primary_disruption_rate,
+                "recovery_success_rate": r.recovery_success_rate,
+                "full_committee_failure_rate": r.full_committee_failure_rate,
+                "missed_slot_rate": r.missed_slot_rate,
+                "n_rounds": r.n_rounds,
+            }
+            for r in (correlated_failure_results or [])
+        ],
+        "attacker_fraction_sweep": [
+            {
+                "strategy": r.strategy,
+                "attacker_fraction": r.attacker_fraction,
+                "attacker_proposer_share": r.attacker_proposer_share,
+                "attacker_committee_share": r.attacker_committee_share,
+                "committee_constraint_violation_rate": r.committee_constraint_violation_rate,
+                "missed_slot_rate": r.missed_slot_rate,
+                "p95_block_time_ms": r.p95_block_time_ms,
+                "mean_solver_ms": r.mean_solver_ms,
+                "n_rounds": r.n_rounds,
+            }
+            for r in (attacker_sweep_results or [])
+        ],
+        "block_withholding": [
+            {
+                "strategy": r.strategy,
+                "withholding_probability": r.withholding_probability,
+                "fallback_activation_rate": r.fallback_activation_rate,
+                "fallback_success_rate": r.fallback_success_rate,
+                "mean_recovery_latency_ms": r.mean_recovery_latency_ms,
+                "p95_recovery_latency_ms": r.p95_recovery_latency_ms,
+                "attacker_primary_share_initial": r.attacker_primary_share_initial,
+                "attacker_primary_share_final": r.attacker_primary_share_final,
+                "final_attacker_proposer_share": r.final_attacker_proposer_share,
+                "missed_slot_rate": r.missed_slot_rate,
+                "n_rounds": r.n_rounds,
+            }
+            for r in (block_withholding_results or [])
+        ],
     }
     with open(path, "w") as f:
         json.dump(payload, f, indent=2)
@@ -594,7 +1351,14 @@ def main() -> None:
     parser.add_argument(
         "--experiments",
         nargs="+",
-        choices=["probe_manipulation", "infra_gaming", "score_racing"],
+        choices=[
+            "probe_manipulation",
+            "infra_gaming",
+            "score_racing",
+            "attacker_sweep",
+            "correlated_failure",
+            "block_withholding",
+        ],
         default=["probe_manipulation", "infra_gaming", "score_racing"],
     )
     # Probe manipulation args
@@ -610,11 +1374,48 @@ def main() -> None:
     parser.add_argument("--racing-nodes", type=int, default=20)
     parser.add_argument("--racing-max-rounds", type=int, default=2000)
     parser.add_argument("--racing-trials", type=int, default=50)
+    # Attacker sweep args
+    parser.add_argument("--sweep-nodes", type=int, default=60)
+    parser.add_argument("--sweep-rounds", type=int, default=500)
+    parser.add_argument("--sweep-fractions", nargs="*", type=float, default=None)
+    parser.add_argument("--sweep-committee-k", type=int, default=5)
+    # Correlated failure args
+    parser.add_argument("--corr-nodes", type=int, default=40)
+    parser.add_argument("--corr-rounds", type=int, default=500)
+    parser.add_argument("--corr-outage-probs", nargs="*", type=float, default=None)
+    parser.add_argument("--corr-committee-k", type=int, default=5)
+    parser.add_argument("--corr-top-concentrated", type=int, default=12)
+    # Block withholding args
+    parser.add_argument("--withholding-nodes", type=int, default=40)
+    parser.add_argument("--withholding-rounds", type=int, default=500)
+    parser.add_argument("--withholding-probs", nargs="*", type=float, default=None)
+    parser.add_argument("--withholding-committee-k", type=int, default=5)
+    parser.add_argument("--withholding-attacker-hw-multiplier", type=float, default=1.6)
+    parser.add_argument("--committee-strategies", nargs="*", default=None)
+    parser.add_argument("--include-exact-when-safe", action="store_true")
     args = parser.parse_args()
+    run_layout = create_run_layout(args.output_dir, "security_experiments")
+    write_run_metadata(
+        run_layout,
+        {
+            "tool": "security_experiments",
+            "layout": run_layout.to_dict(),
+            "config": vars(args),
+        },
+    )
+
+    print("=" * 70)
+    print("  SECURITY EXPERIMENTS")
+    print(f"  output={run_layout.root_dir}")
+    print(f"  experiments={', '.join(args.experiments)}")
+    print("=" * 70)
 
     probe_results: List[ProbeManipulationResult] = []
     infra_results: List[InfraGamingResult] = []
     racing_results: List[ScoreRacingResult] = []
+    attacker_sweep_results: List[AttackerFractionSweepResult] = []
+    correlated_failure_results: List[CorrelatedFailureResult] = []
+    block_withholding_results: List[BlockWithholdingResult] = []
 
     if "probe_manipulation" in args.experiments:
         probe_results = run_probe_manipulation_experiment(
@@ -622,7 +1423,7 @@ def main() -> None:
             num_rounds=args.probe_rounds,
             max_colluding_witnesses=args.max_colluding,
             seed=args.seed,
-            output_dir=args.output_dir,
+            output_dir=run_layout.figures_dir,
         )
 
     if "infra_gaming" in args.experiments:
@@ -632,7 +1433,7 @@ def main() -> None:
             attacker_hardware_multiplier=args.hw_multiplier,
             attacker_fraction=args.attacker_fraction,
             seed=args.seed,
-            output_dir=args.output_dir,
+            output_dir=run_layout.figures_dir,
         )
 
     if "score_racing" in args.experiments:
@@ -641,11 +1442,60 @@ def main() -> None:
             max_rounds=args.racing_max_rounds,
             n_trials=args.racing_trials,
             seed=args.seed,
-            output_dir=args.output_dir,
+            output_dir=run_layout.figures_dir,
         )
 
-    save_security_results(probe_results, infra_results, racing_results, args.output_dir)
+    if "attacker_sweep" in args.experiments:
+        attacker_sweep_results = run_attacker_fraction_sweep_experiment(
+            num_nodes=args.sweep_nodes,
+            num_rounds=args.sweep_rounds,
+            attacker_fractions=args.sweep_fractions,
+            strategies=args.committee_strategies,
+            committee_k=args.sweep_committee_k,
+            include_exact_when_safe=args.include_exact_when_safe,
+            seed=args.seed,
+            output_dir=run_layout.figures_dir,
+        )
 
+    if "correlated_failure" in args.experiments:
+        correlated_failure_results = run_correlated_failure_experiment(
+            num_nodes=args.corr_nodes,
+            num_rounds=args.corr_rounds,
+            outage_probabilities=args.corr_outage_probs,
+            strategies=args.committee_strategies,
+            committee_k=args.corr_committee_k,
+            concentrated_top_nodes=args.corr_top_concentrated,
+            attacker_fraction=args.attacker_fraction,
+            include_exact_when_safe=args.include_exact_when_safe,
+            seed=args.seed,
+            output_dir=run_layout.figures_dir,
+        )
+
+    if "block_withholding" in args.experiments:
+        block_withholding_results = run_block_withholding_experiment(
+            num_nodes=args.withholding_nodes,
+            num_rounds=args.withholding_rounds,
+            withholding_probabilities=args.withholding_probs,
+            strategies=args.committee_strategies,
+            committee_k=args.withholding_committee_k,
+            attacker_fraction=args.attacker_fraction,
+            attacker_hardware_multiplier=args.withholding_attacker_hw_multiplier,
+            include_exact_when_safe=args.include_exact_when_safe,
+            seed=args.seed,
+            output_dir=run_layout.figures_dir,
+        )
+
+    save_security_results(
+        probe_results,
+        infra_results,
+        racing_results,
+        correlated_failure_results,
+        attacker_sweep_results,
+        block_withholding_results,
+        run_layout.data_dir,
+    )
+
+    _refresh_live_findings_dashboard(args.output_dir)
 
 if __name__ == "__main__":
     main()

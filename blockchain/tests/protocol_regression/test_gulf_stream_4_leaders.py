@@ -4,15 +4,31 @@ Gulf Stream 4-Leader Forwarding Test
 Tests that Gulf Stream only forwards transactions to current leader + next 3 leaders.
 """
 
+import os
 import sys
 import time
 import json
-import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'blockchain'))
+
+
+def _ensure_repo_root_on_path() -> None:
+    current = os.path.abspath(os.path.dirname(__file__))
+    for _ in range(6):
+        if os.path.isfile(os.path.join(current, "blockchain", "__init__.py")):
+            if current not in sys.path:
+                sys.path.insert(0, current)
+            return
+        parent = os.path.dirname(current)
+        if parent == current:
+            return
+        current = parent
+
+
+_ensure_repo_root_on_path()
+del _ensure_repo_root_on_path
 
 from blockchain import Blockchain
-from transaction.transaction import Transaction
-from transaction.account_manager import AccountManager
+from blockchain.transaction.transaction import Transaction
+from blockchain.transaction.account_manager import AccountManager
 
 def test_gulf_stream_4_leader_limit():
     """Test that Gulf Stream forwards to maximum 4 leaders only"""

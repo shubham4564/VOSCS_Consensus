@@ -89,7 +89,7 @@ echo "⏳ Wait 10 seconds for nodes to initialize and connect..."
 sleep 10
 
 echo "🔗 Bootstrapping P2P + gossip peer connections..."
-python3 tools/bootstrap_network.py || true
+python3 tools/operational_support/bootstrap_network.py || true
 
 echo "🔍 Checking node status..."
 active_nodes=0
@@ -165,8 +165,8 @@ echo ""
 echo "💡 Useful commands:"
 echo "   🧪 Run transactions: python3 clients/test_sample_transaction.py --count 10"
 echo "   💬 Interactive transaction: python3 clients/simple_transaction_example.py"
-echo "   ⚡ Test TPU Gulf Stream: python3 tests/test_tpu_gulf_stream.py"
-echo "   📊 Performance metrics: python3 tools/comprehensive_metrics.py"
+echo "   ⚡ Test TPU Gulf Stream: python3 tests/runtime_validation/test_tpu_gulf_stream.py"
+echo "   📊 Reviewer evaluation suite: python3 tools/committee_comparative_evaluation.py"
 echo "   🔍 Check TPU status: bash scripts/check_tpu_status.sh"
 echo "   🔍 Check TPU ports: lsof -i :13000-13009"
 echo "   🛑 Stop all nodes: pkill -f 'run_node.py'"

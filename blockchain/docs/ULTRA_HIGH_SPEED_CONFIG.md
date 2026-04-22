@@ -44,7 +44,7 @@ actual_timeout = min(min_timeout, 20)  # 20s max for ultra-fast system
 #### Quick Start (Recommended)
 ```bash
 # Step 1: Initialize leader schedule
-python tools/leader_schedule_init.py --slots 200
+python tools/operational_support/leader_schedule_init.py --slots 200
 
 # Step 2: Run ultra-fast transaction test
 python clients/test_sample_transaction.py --count 20 --performance
@@ -53,7 +53,7 @@ python clients/test_sample_transaction.py --count 20 --performance
 #### Manual Step-by-Step
 ```bash
 # Initialize 600-slot leader schedule
-python tools/leader_schedule_init.py --slots 200
+python tools/operational_support/leader_schedule_init.py --slots 200
 
 # Run ultra-fast transaction test
 python clients/test_sample_transaction.py --count 10 --performance
@@ -62,7 +62,7 @@ python clients/test_sample_transaction.py --count 10 --performance
 #### Status Check
 ```bash
 # Check 600-slot epoch status
-python tools/leader_schedule_init.py --check-only
+python tools/operational_support/leader_schedule_init.py --check-only
 ```
 
 ### 📈 Expected Output Examples
@@ -111,7 +111,7 @@ python tools/leader_schedule_init.py --check-only
 ### 🚀 Next Steps
 
 1. **Start Nodes**: `./start_nodes.sh`
-2. **Initialize Schedule**: `python tools/leader_schedule_init.py --slots 200`
+2. **Initialize Schedule**: `python tools/operational_support/leader_schedule_init.py --slots 200`
 3. **Run Performance Tests**: Scale up gradually from 5 → 20 → 100 transactions
 4. **Monitor Performance**: Use `--performance` flag for detailed metrics
 5. **Optimize Further**: Adjust quantum parameters based on test results

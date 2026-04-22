@@ -72,10 +72,12 @@ The following are useful, but not needed just to run nodes + submit transactions
   - `*_REPORT*.json`, `*_metrics_*.json`
 
 - Diagnostics / sync tools
-  - `tools/sync_checker.py`, `tools/direct_sync_tool.py`, `tools/emergency_sync_tool.py`, `tools/block_sync_diagnosis.py`, etc.
+  - `tools/operational_support/sync_checker.py`, `tools/operational_support/direct_sync_tool.py`, `tools/operational_support/emergency_sync_tool.py`, `tools/operational_support/block_sync_diagnosis.py`, etc.
 
 - Stress tests / benchmarks
-  - `tools/real_transaction_stress_test.py`, `tools/enhanced_stress_test.py`, `tests/simple_load_test.py`, etc.
+  - Legacy utilities now archived under `archive/legacy_reporting_tools/`
+  - `archive/legacy_reporting_tools/real_transaction_stress_test.py`, `archive/legacy_reporting_tools/enhanced_stress_test.py`, `archive/legacy_reporting_tools/comprehensive_metrics.py`, etc.
+  - `tests/runtime_validation/simple_load_test.py`, etc.
 
 - Tests
   - `test_*.py`

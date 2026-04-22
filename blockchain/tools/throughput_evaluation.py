@@ -64,6 +64,7 @@ from blockchain.quantum_consensus import QuantumAnnealingConsensus
 from blockchain.transaction.wallet import Wallet
 from blockchain.transaction.transaction import Transaction
 from blockchain.blockchain import Blockchain
+from blockchain.utils.result_layout import create_run_layout, write_run_metadata
 
 
 @dataclass
@@ -791,11 +792,24 @@ def main() -> None:
         use_real_transactions=args.real,
         num_wallets=args.wallets,
     )
+    run_name = "throughput_evaluation_real" if cfg.use_real_transactions else "throughput_evaluation"
+    run_layout = create_run_layout(cfg.output_dir, run_name)
+    cfg.output_dir = run_layout.root_dir
+    write_run_metadata(
+        run_layout,
+        {
+            "tool": "throughput_evaluation",
+            "layout": run_layout.to_dict(),
+            "config": cfg.__dict__,
+            "parallel_requested": not args.sequential,
+        },
+    )
     
     mode = "REAL transactions" if cfg.use_real_transactions else "SIMULATED"
     print("🚀 Running throughput evaluation...")
     print(f"   Mode: {mode}")
     print(f"   Nodes: {cfg.num_nodes}, Blocks: {cfg.num_blocks}, TXs/block: {cfg.transactions_per_block}")
+    print(f"   Output: {run_layout.root_dir}")
     if cfg.use_real_transactions:
         print(f"   Wallets: {cfg.num_wallets}")
     
@@ -808,9 +822,7 @@ def main() -> None:
     
     results = evaluator.run_all_strategies(parallel=parallel)
     
-    timestamp = time.strftime("%Y%m%d_%H%M%S")
-    mode_suffix = "_real" if cfg.use_real_transactions else ""
-    prefix = os.path.join(cfg.output_dir, f"throughput{mode_suffix}_{timestamp}")
+    prefix = os.path.join(run_layout.figures_dir, "throughput")
     
     # Print summary
     print("\n📊 Results Summary:")
@@ -826,7 +838,7 @@ def main() -> None:
     print("-" * 90)
     
     # Save outputs
-    metrics_path = f"{prefix}_metrics.json"
+    metrics_path = os.path.join(run_layout.data_dir, "throughput_metrics.json")
     save_results_json(results, cfg, metrics_path)
     plot_results(results, prefix)
     

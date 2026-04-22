@@ -52,6 +52,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 from blockchain.quantum_consensus.quantum_annealing_consensus import (  # noqa: E402
     QuantumAnnealingConsensus,
 )
+from blockchain.utils.result_layout import create_run_layout, write_run_metadata  # noqa: E402
 
 
 @dataclass
@@ -426,6 +427,16 @@ def main() -> None:
         include_ilp=args.ilp,
         include_vrf=not args.no_vrf,
     )
+    run_layout = create_run_layout(cfg.output_dir, "suitability_timing_benchmark")
+    cfg.output_dir = run_layout.root_dir
+    write_run_metadata(
+        run_layout,
+        {
+            "tool": "suitability_timing_benchmark",
+            "layout": run_layout.to_dict(),
+            "config": cfg.__dict__,
+        },
+    )
 
     if cfg.min_nodes <= 0 or cfg.max_nodes <= 0 or cfg.step <= 0:
         raise SystemExit("min-nodes, max-nodes, and step must be positive integers")
@@ -437,14 +448,13 @@ def main() -> None:
         f"  Node range: {cfg.min_nodes}..{cfg.max_nodes} step {cfg.step}, "
         f"trials: {cfg.trials_per_size}, seed: {cfg.seed}"
     )
+    print(f"  Output: {run_layout.root_dir}")
     print(f"  OR-Tools ILP available: {_ORTOOLS_AVAILABLE}")
 
     results = run_benchmark(cfg)
 
-    timestamp = time.strftime("%Y%m%d_%H%M%S")
-    prefix = os.path.join(cfg.output_dir, f"suitability_timing_{timestamp}")
-    json_path = f"{prefix}_metrics.json"
-    png_path = f"{prefix}_timing_comparison.png"
+    json_path = os.path.join(run_layout.data_dir, "suitability_timing_metrics.json")
+    png_path = os.path.join(run_layout.figures_dir, "suitability_timing_comparison.png")
 
     _save_results_json(cfg, results, json_path)
     _plot_results(cfg, results, png_path)

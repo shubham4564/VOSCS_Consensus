@@ -1,8 +1,8 @@
-# Quantum-Enhanced Solana-Style Blockchain
+# Verifiable Optimization based Blockchain Consensus
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 
-A high-performance blockchain implementation featuring **Solana-style architecture** with quantum-annealing-based consensus, Proof of History (PoH), parallel execution (Sealevel), and efficient block propagation (Turbine).
+A research artifact for **verifiable optimization-based blockchain consensus** with Solana-style ordering, execution, and propagation components.
 
 > **Note**: This is a research artifact submitted for anonymous peer review. All identifying information has been removed.
 
@@ -36,7 +36,7 @@ All Python dependencies are pinned in `blockchain/requirements.txt`.
 ```bash
 # 1. Clone and enter the project
 git clone <repository-url>
-cd proofwithquantumannealing/blockchain
+cd <repository-root>/blockchain
 
 # 2. Create a virtual environment (recommended)
 python -m venv venv && source venv/bin/activate
@@ -69,143 +69,155 @@ python tools/leader_monitor.py
 
 ## Reproducing the Evaluation
 
-All evaluation scripts live under `blockchain/tools/` and write results (JSON metrics + PNG figures) to `blockchain/reports/`. **No running nodes are required** for the offline evaluations — they instantiate the consensus engine directly.
+All reviewer-facing evaluation tools live under `blockchain/tools/` and write timestamped run folders under `blockchain/reports/`. Offline evaluation does **not** require running validator nodes.
 
-### 1. Main Evaluation (Baselines + Ablations)
+### Reviewer Setup
 
-Compares quantum annealing against 9 baselines across 100–1000 nodes and 1000+ rounds. Produces PQI, agreement rate, security, and solver-time charts plus a full ablation heatmap.
+From the repository root:
 
 ```bash
 cd blockchain
-python tools/evaluation_overhaul.py
-# Output: reports/evaluation_overhaul_*.json
-#         reports/eval_pqi_*.png
-#         reports/eval_agreement_*.png
-#         reports/eval_security_*.png
-#         reports/eval_solver_time_*.png
-#         reports/ablation_heatmap_*.png
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 ```
 
-### 2. Security Experiments
+### Recommended End-to-End Reproduction
 
-Three targeted attack scenarios: probe manipulation, infrastructure gaming, and score-racing / fairness-bound verification.
+For a single command that reproduces the committee comparison stack and emits a manifest plus reviewer-facing exports, run:
 
 ```bash
-python tools/security_experiments.py
-# Output: reports/security_experiments_*.json
-#         reports/security_probe_manipulation_*.png
-#         reports/security_infra_gaming_*.png
-#         reports/security_score_racing_*.png
+cd blockchain
+python tools/committee_comparative_evaluation.py --output-dir reports/reviewer_eval
 ```
 
-### 3. Proposer-Selection Timing Benchmark
+This command creates a timestamped run directory of the form:
 
-Measures wall-clock selection latency for quantum (SA-QUBO), classical greedy, argmax, and VRF-weighted strategies as node count scales from 5 to 100+.
+```text
+reports/reviewer_eval/
+  <YYYYMMDD_HHMMSS>_committee_comparative_evaluation/
+    reduced/
+    literature/
+    solver/
+    security/
+    exports/
+    metadata/
+```
+
+The most important reviewer-facing files are:
+
+- `metadata/comparative_manifest.json`
+- `metadata/comparative_summary.md`
+- `exports/` CSV, Markdown, and LaTeX summary files
+- stage-specific JSON and figures under each stage's `data/` and `figures/`
+
+### Verifying That The Comparative Run Completed
 
 ```bash
+cd blockchain
+latest_run="$(ls -dt reports/reviewer_eval/*committee_comparative_evaluation | head -n 1)"
+test -f "$latest_run/metadata/comparative_manifest.json"
+test -f "$latest_run/metadata/comparative_summary.md"
+find "$latest_run" -maxdepth 2 -type d | sort
+ls "$latest_run/exports"
+```
+
+If the run completed correctly, the `test -f` checks succeed silently, the directory listing shows the expected stage folders, and `exports/` contains reviewer-facing tables and summaries.
+
+### Reproducing Individual Evaluation Components
+
+Main strategy comparison and ablation harness:
+
+```bash
+cd blockchain
+python tools/evaluation_overhaul.py \
+  --output-dir reports/eval_main \
+  --strategy-preset literature
+```
+
+Committee security experiments:
+
+```bash
+cd blockchain
+python tools/security_experiments.py \
+  --output-dir reports/eval_security \
+  --experiments probe_manipulation infra_gaming score_racing attacker_sweep correlated_failure block_withholding
+```
+
+Selection timing benchmark:
+
+```bash
+cd blockchain
 python tools/suitability_timing_benchmark.py
-# Output: reports/suitability_timing_*_metrics.json
-#         reports/suitability_timing_*_timing_comparison.png
 ```
 
-### 4. Consensus Baseline Comparison
-
-Controlled simulation (20 nodes, 300 rounds) computing PQI, missed-slot rate, p95 block time, Nakamoto coefficient, and attacker proposer share for 6 strategies.
+Throughput and finality evaluation:
 
 ```bash
-python tools/consensus_baseline_evaluation.py
-# Output: reports/ (comparison graphs)
-```
-
-### 5. Throughput and Finality Evaluation
-
-Measures TPS, block production time, and finality across strategies (50 nodes, 100 blocks, 500 tx/block).
-
-```bash
+cd blockchain
 python tools/throughput_evaluation.py
-# Output: reports/ (JSON metrics + comparison graphs)
 ```
 
-### 6. Live Network Tests (requires running nodes)
+### Verifying With Reviewer-Facing Tests
+
+The reviewer-facing pytest checks are kept at the top level of `blockchain/tests/`.
 
 ```bash
-# Start 5 nodes first
-./start_nodes.sh 5
-
-# Transaction performance (consensus time, throughput)
-python tests/test_performance_metrics.py
-
-# Full Solana-style validator verification and voting
-python tests/test_solana_validation.py
-
-# Gulf Stream + PoH + Turbine end-to-end
-python tests/test_gulf_stream_transactions.py
-
-# Load test (100 concurrent transactions)
-python clients/send_100_transactions.py
+cd blockchain
+python -m pytest tests/test_committee_comparative_evaluation.py -q
+python -m pytest tests/test_security_committee_experiments.py -q
+python -m pytest tests/test_committee_selection.py -q
 ```
 
-> **Tip**: Run the offline evaluations (1–5) first — they are deterministic and do not require network setup.
+These tests verify that the comparative runner, committee security experiments, and committee selection logic all produce the expected artifacts and invariants.
+
+### Result Layout
+
+Reviewer-facing runs use a common directory layout:
+
+```text
+<output-root>/
+  <YYYYMMDD_HHMMSS>_<run-name>/
+    data/
+    figures/
+    exports/
+    metadata/
+```
+
+- `data/` stores primary JSON artifacts
+- `figures/` stores generated plots
+- `exports/` stores CSV, Markdown, and LaTeX summaries
+- `metadata/` stores the run manifest and configuration summary
 
 ---
 
 ## Project Structure
 
 ```
-blockchain/
-├── run_node.py                  # Node entry point
-├── start_nodes.sh               # Multi-node launcher
-├── requirements.txt             # Pinned Python dependencies
-├── Dockerfile                   # Container image
-│
-├── blockchain/                  # Core library
-│   ├── node.py                  # Node orchestrator (P2P, gossip, TPU, slots)
-│   ├── blockchain.py            # Chain state, genesis, validation
-│   ├── block.py                 # Block data structure
-│   ├── poh_sequencer.py         # Proof of History
-│   ├── sealevel_executor.py     # Parallel transaction execution
-│   ├── turbine_protocol.py      # Block propagation
-│   ├── fast_gulf_stream.py      # Transaction forwarding to leaders
-│   ├── slot_producer.py         # Slot-based block production
-│   ├── consensus/               # PoH, Sealevel, Turbine, TPU, leader schedule
-│   ├── quantum_consensus/       # Quantum annealing leader selection (QUBO)
-│   ├── transaction/             # Transaction, wallet (ECDSA P-256), pool
-│   ├── p2p/                     # Socket communication, peer discovery, mempool
-│   └── utils/                   # Logging, serialization helpers
-│
-├── api/                         # FastAPI REST API
-│   └── api_v1/                  # Blockchain, transaction, leader endpoints
-│
-├── gossip_protocol/             # CRDS-based gossip (Solana-style)
-│
-├── tools/                       # Evaluation and operations
-│   ├── evaluation_overhaul.py          # Main evaluation harness
-│   ├── security_experiments.py         # Attack scenario experiments
-│   ├── suitability_timing_benchmark.py # Selection latency benchmark
-│   ├── consensus_baseline_evaluation.py# Strategy comparison
-│   ├── throughput_evaluation.py        # TPS and finality evaluation
-│   ├── leader_monitor.py              # Real-time leader monitoring
-│   ├── comprehensive_metrics.py       # Live performance report
-│   └── bootstrap_network.py           # Network bootstrapping
-│
-├── tests/                       # Integration and unit tests
-│   ├── test_solana_validation.py
-│   ├── test_performance_metrics.py
-│   ├── test_gulf_stream_*.py
-│   └── validation_tests/        # Leader schedule and gossip verification
-│
-├── clients/                     # Transaction submission scripts
-│   ├── simple_transaction_example.py
-│   ├── test_sample_transaction.py
-│   └── send_100_transactions.py
-│
-├── reports/                     # Evaluation outputs (JSON + PNG)
-├── genesis_config/              # Genesis block and bootstrap keys
-├── keys/                        # ECDSA node keys (generated)
-├── configs/                     # Tuning configs (TPS optimization)
-├── monitoring/                  # Health checks and metrics exporters
-├── scripts/                     # Key generation, status checks
-└── docs/                        # Internal development docs
+.
+├── README.md
+├── README.md.bak
+├── docker-compose.yml
+├── archive/
+└── blockchain/
+  ├── Dockerfile
+  ├── requirements.txt
+  ├── run_node.py
+  ├── start_nodes.sh
+  ├── api/
+  ├── blockchain/
+  ├── clients/
+  ├── configs/
+  ├── docs/
+  ├── genesis_config/
+  ├── gossip_protocol/
+  ├── keys/
+  ├── logs/
+  ├── monitoring/
+  ├── reports/
+  ├── scripts/
+  ├── tests/
+  └── tools/
 ```
 
 ---

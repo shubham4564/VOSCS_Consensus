@@ -161,13 +161,13 @@ curl http://localhost:11001/api/v1/blockchain/leader/quantum-selection/
 
 ### 2. Automated Testing Scripts
 
-**Python Script:** `tests/api_test.py`
+**Python Script:** `tests/runtime_validation/api_test.py`
 ```bash
 # Test single node
-python tests/api_test.py 11001
+python tests/runtime_validation/api_test.py 11001
 
 # Test multiple nodes
-python tests/api_test.py 11001 3
+python tests/runtime_validation/api_test.py 11001 3
 ```
 
 **Bash Script:** `scripts/test_leader_apis.sh`
@@ -176,13 +176,13 @@ python tests/api_test.py 11001 3
 ./scripts/test_leader_apis.sh 11000 3
 ```
 
-**Comprehensive Monitor:** `tools/leader_monitor.py`
+**Comprehensive Monitor:** `tools/operational_support/leader_monitor.py`
 ```bash
 # Single monitoring run
-python tools/leader_monitor.py 11000 3 --detailed
+python tools/operational_support/leader_monitor.py 11000 3 --detailed
 
 # Continuous monitoring
-python tools/leader_monitor.py 11000 3 --continuous --interval 10
+python tools/operational_support/leader_monitor.py 11000 3 --continuous --interval 10
 ```
 
 ## 📊 Understanding the Results

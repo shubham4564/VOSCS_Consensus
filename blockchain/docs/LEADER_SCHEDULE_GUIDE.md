@@ -14,7 +14,7 @@ This guide ensures that at least **200 leader slots** are pre-generated before s
 ### Option 1: Safe Transaction Test (Recommended)
 ```bash
 # Step 1: Initialize leader schedule (200+ slots)
-python tools/leader_schedule_init.py --slots 200
+python tools/operational_support/leader_schedule_init.py --slots 200
 
 # Step 2: Run transactions after initialization
 python clients/test_sample_transaction.py --count 10 --performance
@@ -23,7 +23,7 @@ python clients/test_sample_transaction.py --count 10 --performance
 ### Option 2: Manual Step-by-Step
 ```bash
 # Step 1: Initialize leader schedule (200+ slots)
-python tools/leader_schedule_init.py --slots 200
+python tools/operational_support/leader_schedule_init.py --slots 200
 
 # Step 2: Run transactions after initialization
 python clients/test_sample_transaction.py --count 10 --performance
@@ -48,7 +48,7 @@ python clients/test_sample_transaction.py --count 10 --performance
 
 ### 1. Leader Schedule Initialization Tool
 ```bash
-python tools/leader_schedule_init.py [options]
+python tools/operational_support/leader_schedule_init.py [options]
 
 Options:
   --slots SLOTS     Minimum slots to pre-generate (default: 200)
@@ -76,7 +76,7 @@ Options:
 
 ### 2. Safe Transaction Test Tool
 ```bash
-python tools/leader_schedule_init.py [options]
+python tools/operational_support/leader_schedule_init.py [options]
 
 Options:
   --count COUNT        Number of transactions (default: 5)
@@ -102,14 +102,14 @@ python clients/test_sample_transaction.py [options]
 ./start_nodes.sh
 
 # 2. Initialize with 200+ slots and run test
-python tools/leader_schedule_init.py --slots 200
+python tools/operational_support/leader_schedule_init.py --slots 200
 python clients/test_sample_transaction.py --count 20 --performance
 ```
 
 ### Example 2: Quick Status Check
 ```bash
 # Check current leader schedule status
-python tools/leader_schedule_init.py --check-only
+python tools/operational_support/leader_schedule_init.py --check-only
 
 # Output example:
 # 📊 CURRENT STATUS CHECK
@@ -122,7 +122,7 @@ python tools/leader_schedule_init.py --check-only
 ### Example 3: High-Volume Testing
 ```bash
 # Force fresh schedule generation
-python tools/leader_schedule_init.py --slots 300 --force
+python tools/operational_support/leader_schedule_init.py --slots 300 --force
 
 # Run high-volume performance test
 python clients/send_100_transactions.py
@@ -173,7 +173,7 @@ def measure_consensus_time(initial_block_count, timeout=60, min_slots_required=2
 ### 1. Always Initialize First
 ```bash
 # Good: Initialize before transactions
-python tools/leader_schedule_init.py --slots 200
+python tools/operational_support/leader_schedule_init.py --slots 200
 python clients/test_sample_transaction.py --count 10
 
 # Optional: run with performance metrics
@@ -183,10 +183,10 @@ python clients/test_sample_transaction.py --count 10 --performance
 ### 2. Monitor Slot Coverage
 ```bash
 # Check status regularly
-python tools/leader_schedule_init.py --check-only
+python tools/operational_support/leader_schedule_init.py --check-only
 
 # Force regeneration if needed
-python tools/leader_schedule_init.py --slots 250 --force
+python tools/operational_support/leader_schedule_init.py --slots 250 --force
 ```
 
 ### 3. Scale Testing Gradually
@@ -206,16 +206,16 @@ python clients/send_100_transactions.py
 ### Issue: "Leader schedule not ready"
 ```bash
 # Solution: Force regeneration
-python tools/leader_schedule_init.py --slots 200 --force
+python tools/operational_support/leader_schedule_init.py --slots 200 --force
 ```
 
 ### Issue: "Consensus measurement timeout"
 ```bash
 # Check if leader schedule has enough coverage
-python tools/leader_schedule_init.py --check-only
+python tools/operational_support/leader_schedule_init.py --check-only
 
 # Increase minimum slots if needed
-python tools/leader_schedule_init.py --slots 300
+python tools/operational_support/leader_schedule_init.py --slots 300
 ```
 
 ### Issue: "Cannot connect to node"
@@ -227,7 +227,7 @@ python tools/leader_schedule_init.py --slots 300
 sleep 30
 
 # Try again
-python tools/leader_schedule_init.py --check-only
+python tools/operational_support/leader_schedule_init.py --check-only
 ```
 
 ## 📊 API Endpoints (If Available)
