@@ -383,6 +383,9 @@ class AttackerFractionSweepResult:
     committee_constraint_violation_rate: float
     missed_slot_rate: float
     p95_block_time_ms: float
+    estimated_throughput_blocks_per_sec: float
+    throughput_degradation_ratio: float
+    finality_degradation_ratio: float
     mean_solver_ms: float
     n_rounds: int
 
@@ -427,6 +430,43 @@ class ProbeManipulationResult:
     flip_rate: float          # fraction of rounds attacker displaced true-best node
     inflation_ms: float       # mean added latency to honest nodes (ms)
     n_rounds: int
+
+
+@dataclass
+class WitnessCollusionResult:
+    q: int
+    q_min: int
+    population_size: int
+    attacker_witnesses: int
+    measured_capture_rate: float
+    hypergeometric_capture_bound: float
+    absolute_gap: float
+    n_trials: int
+
+
+def _hypergeometric_capture_bound(population_size: int, attacker_witnesses: int, q: int, q_min: int) -> float:
+    if population_size <= 0 or q <= 0 or q_min <= 0 or q > population_size or q_min > q:
+        return 0.0
+    if attacker_witnesses <= 0 or attacker_witnesses < q_min:
+        return 0.0
+
+    denominator = math.comb(population_size, q)
+    if denominator <= 0:
+        return 0.0
+
+    capture_probability = 0.0
+    upper = min(q, attacker_witnesses)
+    honest_witnesses = population_size - attacker_witnesses
+    for compromised in range(q_min, upper + 1):
+        honest_needed = q - compromised
+        if honest_needed > honest_witnesses:
+            continue
+        capture_probability += (
+            math.comb(attacker_witnesses, compromised)
+            * math.comb(honest_witnesses, honest_needed)
+            / denominator
+        )
+    return max(0.0, min(1.0, capture_probability))
 
 
 def run_probe_manipulation_experiment(
@@ -516,6 +556,74 @@ def run_probe_manipulation_experiment(
     return results
 
 
+def run_witness_collusion_experiment(
+    num_nodes: int = 40,
+    num_trials: int = 2000,
+    q_values: Optional[List[int]] = None,
+    q_min_values: Optional[List[int]] = None,
+    attacker_fraction: float = 0.2,
+    seed: int = 7,
+    output_dir: str = "reports",
+) -> List[WitnessCollusionResult]:
+    """Compare simulated witness-capture rates against the hypergeometric theorem bound."""
+    if q_values is None:
+        q_values = [3, 5, 7, 10]
+    if q_min_values is None:
+        q_min_values = [1, 2, 3]
+
+    rng = random.Random(seed)
+    witness_population = max(1, num_nodes - 2)
+    attacker_witnesses = min(witness_population, max(0, int(round(witness_population * attacker_fraction))))
+    witness_pool = list(range(witness_population))
+    results: List[WitnessCollusionResult] = []
+
+    print("\n" + "=" * 72)
+    print("  EXPERIMENT 1B: Witness-Collusion Capture Sweep")
+    print(
+        f"  nodes={num_nodes} witness_population={witness_population} attacker_witnesses={attacker_witnesses} trials={num_trials}"
+    )
+    print("=" * 72)
+
+    for q in sorted(set(q_values)):
+        if q <= 0 or q > witness_population:
+            continue
+        for q_min in sorted(set(q_min_values)):
+            if q_min <= 0 or q_min > q:
+                continue
+
+            captures = 0
+            for _ in range(num_trials):
+                sampled = rng.sample(witness_pool, q)
+                compromised = sum(1 for witness_idx in sampled if witness_idx < attacker_witnesses)
+                if compromised >= q_min:
+                    captures += 1
+
+            measured_capture_rate = captures / num_trials if num_trials > 0 else 0.0
+            hypergeometric_capture_bound = _hypergeometric_capture_bound(
+                witness_population,
+                attacker_witnesses,
+                q,
+                q_min,
+            )
+            result = WitnessCollusionResult(
+                q=q,
+                q_min=q_min,
+                population_size=witness_population,
+                attacker_witnesses=attacker_witnesses,
+                measured_capture_rate=measured_capture_rate,
+                hypergeometric_capture_bound=hypergeometric_capture_bound,
+                absolute_gap=abs(measured_capture_rate - hypergeometric_capture_bound),
+                n_trials=num_trials,
+            )
+            results.append(result)
+            print(
+                f"  q={q:2d} q_min={q_min:2d} measured={measured_capture_rate:.3f} bound={hypergeometric_capture_bound:.3f} gap={result.absolute_gap:.3f}"
+            )
+
+    _plot_witness_collusion(results, output_dir)
+    return results
+
+
 def _plot_probe_manipulation(results: List[ProbeManipulationResult], output_dir: str) -> None:
     os.makedirs(output_dir, exist_ok=True)
     ts = time.strftime("%Y%m%d_%H%M%S")
@@ -533,6 +641,40 @@ def _plot_probe_manipulation(results: List[ProbeManipulationResult], output_dir:
     ax.grid(True, linestyle="--", alpha=0.4)
     plt.tight_layout()
     path = os.path.join(output_dir, f"security_probe_manipulation_{ts}.png")
+    plt.savefig(path)
+    plt.close(fig)
+    print(f"  Plot saved: {path}")
+
+
+def _plot_witness_collusion(results: List[WitnessCollusionResult], output_dir: str) -> None:
+    if not results:
+        return
+
+    os.makedirs(output_dir, exist_ok=True)
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    q_min_values = sorted(set(result.q_min for result in results))
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    for q_min in q_min_values:
+        items = sorted([result for result in results if result.q_min == q_min], key=lambda item: item.q)
+        xs = [item.q for item in items]
+        ax.plot(xs, [item.measured_capture_rate for item in items], marker="o", label=f"measured q_min={q_min}")
+        ax.plot(
+            xs,
+            [item.hypergeometric_capture_bound for item in items],
+            linestyle="--",
+            marker="x",
+            label=f"bound q_min={q_min}",
+        )
+
+    ax.set_xlabel("Witness sample size q")
+    ax.set_ylabel("Capture probability")
+    ax.set_title("Witness-Collusion Capture: measured vs hypergeometric bound")
+    ax.set_ylim(0, 1.05)
+    ax.grid(True, linestyle="--", alpha=0.4)
+    ax.legend(ncol=2)
+    plt.tight_layout()
+    path = os.path.join(output_dir, f"security_witness_collusion_{ts}.png")
     plt.savefig(path)
     plt.close(fig)
     print(f"  Plot saved: {path}")
@@ -828,7 +970,7 @@ def run_attacker_fraction_sweep_experiment(
         include_exact_when_safe=include_exact_when_safe,
     )
 
-    results: List[AttackerFractionSweepResult] = []
+    raw_rows: List[Dict[str, float]] = []
 
     print("\n" + "=" * 65)
     print("  EXPERIMENT 4: Attacker-Fraction Sweep")
@@ -847,23 +989,57 @@ def run_attacker_fraction_sweep_experiment(
         )
         for strategy in strategies:
             metrics = run_simulation(cfg, strategy, verbose=False)
-            results.append(
-                AttackerFractionSweepResult(
-                    strategy=strategy,
-                    attacker_fraction=attacker_fraction,
-                    attacker_proposer_share=metrics.attacker_share,
-                    attacker_committee_share=metrics.committee_attacker_seat_share,
-                    committee_constraint_violation_rate=metrics.committee_constraint_violation_rate,
-                    missed_slot_rate=metrics.missed_slot_rate,
-                    p95_block_time_ms=metrics.p95_block_time_ms,
-                    mean_solver_ms=metrics.mean_solver_ms,
-                    n_rounds=num_rounds,
-                )
+            raw_rows.append(
+                {
+                    "strategy": strategy,
+                    "attacker_fraction": attacker_fraction,
+                    "attacker_proposer_share": metrics.attacker_share,
+                    "attacker_committee_share": metrics.committee_attacker_seat_share,
+                    "committee_constraint_violation_rate": metrics.committee_constraint_violation_rate,
+                    "missed_slot_rate": metrics.missed_slot_rate,
+                    "p95_block_time_ms": metrics.p95_block_time_ms,
+                    "mean_solver_ms": metrics.mean_solver_ms,
+                    "n_rounds": float(num_rounds),
+                }
             )
             print(
                 f"  fraction={attacker_fraction:.2f}  strategy={strategy:18s}  proposer={metrics.attacker_share:.3f}  "
                 f"committee={metrics.committee_attacker_seat_share:.3f}  missed={metrics.missed_slot_rate:.3f}"
             )
+
+    baseline_by_strategy: Dict[str, Dict[str, float]] = {}
+    for row in raw_rows:
+        strategy = str(row["strategy"])
+        current = baseline_by_strategy.get(strategy)
+        if current is None or float(row["attacker_fraction"]) < float(current["attacker_fraction"]):
+            baseline_by_strategy[strategy] = row
+
+    results: List[AttackerFractionSweepResult] = []
+    for row in raw_rows:
+        strategy = str(row["strategy"])
+        baseline = baseline_by_strategy[strategy]
+        current_p95 = max(float(row["p95_block_time_ms"]), 1e-9)
+        baseline_p95 = max(float(baseline["p95_block_time_ms"]), 1e-9)
+        estimated_throughput = 1000.0 / current_p95
+        baseline_throughput = 1000.0 / baseline_p95
+        throughput_degradation = max(0.0, 1.0 - (estimated_throughput / baseline_throughput)) if baseline_throughput > 0 else 0.0
+        finality_degradation = max(0.0, (current_p95 / baseline_p95) - 1.0)
+        results.append(
+            AttackerFractionSweepResult(
+                strategy=strategy,
+                attacker_fraction=float(row["attacker_fraction"]),
+                attacker_proposer_share=float(row["attacker_proposer_share"]),
+                attacker_committee_share=float(row["attacker_committee_share"]),
+                committee_constraint_violation_rate=float(row["committee_constraint_violation_rate"]),
+                missed_slot_rate=float(row["missed_slot_rate"]),
+                p95_block_time_ms=current_p95,
+                estimated_throughput_blocks_per_sec=estimated_throughput,
+                throughput_degradation_ratio=throughput_degradation,
+                finality_degradation_ratio=finality_degradation,
+                mean_solver_ms=float(row["mean_solver_ms"]),
+                n_rounds=int(row["n_rounds"]),
+            )
+        )
 
     _plot_attacker_fraction_sweep(results, output_dir)
     return results
@@ -924,6 +1100,25 @@ def _plot_attacker_fraction_sweep(results: List[AttackerFractionSweepResult], ou
         path = os.path.join(output_dir, f"security_attacker_sweep_overhead_{ts}.png")
         plt.savefig(path)
         plt.close(fig)
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4), sharex=True)
+    for strategy, items in grouped.items():
+        xs = [item.attacker_fraction for item in items]
+        axes[0].plot(xs, [item.throughput_degradation_ratio for item in items], marker="o", label=strategy)
+        axes[1].plot(xs, [item.finality_degradation_ratio for item in items], marker="o", label=strategy)
+
+    axes[0].set_title("Throughput degradation")
+    axes[1].set_title("Finality degradation")
+    axes[0].set_ylabel("Relative degradation")
+    axes[0].set_xlabel("Attacker fraction")
+    axes[1].set_xlabel("Attacker fraction")
+    for ax in axes:
+        ax.grid(True, linestyle="--", alpha=0.4)
+        ax.legend()
+    plt.tight_layout()
+    path = os.path.join(output_dir, f"security_attacker_sweep_degradation_{ts}.png")
+    plt.savefig(path)
+    plt.close(fig)
 
 
 # ---------------------------------------------------------------------------
@@ -1246,6 +1441,7 @@ def save_security_results(
     correlated_failure_results: Optional[List[CorrelatedFailureResult]],
     attacker_sweep_results: Optional[List[AttackerFractionSweepResult]],
     block_withholding_results: Optional[List[BlockWithholdingResult]],
+    witness_collusion_results: Optional[List[WitnessCollusionResult]],
     output_dir: str,
 ) -> str:
     os.makedirs(output_dir, exist_ok=True)
@@ -1273,6 +1469,19 @@ def save_security_results(
                 "n_rounds": r.n_rounds,
             }
             for r in probe_results
+        ],
+        "witness_collusion": [
+            {
+                "q": r.q,
+                "q_min": r.q_min,
+                "population_size": r.population_size,
+                "attacker_witnesses": r.attacker_witnesses,
+                "measured_capture_rate": r.measured_capture_rate,
+                "hypergeometric_capture_bound": r.hypergeometric_capture_bound,
+                "absolute_gap": r.absolute_gap,
+                "n_trials": r.n_trials,
+            }
+            for r in (witness_collusion_results or [])
         ],
         "infrastructure_gaming": infra_sampled,
         "score_racing": [
@@ -1308,6 +1517,9 @@ def save_security_results(
                 "committee_constraint_violation_rate": r.committee_constraint_violation_rate,
                 "missed_slot_rate": r.missed_slot_rate,
                 "p95_block_time_ms": r.p95_block_time_ms,
+                "estimated_throughput_blocks_per_sec": r.estimated_throughput_blocks_per_sec,
+                "throughput_degradation_ratio": r.throughput_degradation_ratio,
+                "finality_degradation_ratio": r.finality_degradation_ratio,
                 "mean_solver_ms": r.mean_solver_ms,
                 "n_rounds": r.n_rounds,
             }
@@ -1353,6 +1565,7 @@ def main() -> None:
         nargs="+",
         choices=[
             "probe_manipulation",
+            "witness_collusion",
             "infra_gaming",
             "score_racing",
             "attacker_sweep",
@@ -1365,6 +1578,10 @@ def main() -> None:
     parser.add_argument("--probe-nodes", type=int, default=30)
     parser.add_argument("--probe-rounds", type=int, default=500)
     parser.add_argument("--max-colluding", type=int, default=10)
+    parser.add_argument("--witness-collusion-nodes", type=int, default=40)
+    parser.add_argument("--witness-collusion-trials", type=int, default=2000)
+    parser.add_argument("--witness-q-values", nargs="*", type=int, default=None)
+    parser.add_argument("--witness-q-min-values", nargs="*", type=int, default=None)
     # Infra gaming args
     parser.add_argument("--infra-nodes", type=int, default=40)
     parser.add_argument("--infra-rounds", type=int, default=1000)
@@ -1416,12 +1633,24 @@ def main() -> None:
     attacker_sweep_results: List[AttackerFractionSweepResult] = []
     correlated_failure_results: List[CorrelatedFailureResult] = []
     block_withholding_results: List[BlockWithholdingResult] = []
+    witness_collusion_results: List[WitnessCollusionResult] = []
 
     if "probe_manipulation" in args.experiments:
         probe_results = run_probe_manipulation_experiment(
             num_nodes=args.probe_nodes,
             num_rounds=args.probe_rounds,
             max_colluding_witnesses=args.max_colluding,
+            seed=args.seed,
+            output_dir=run_layout.figures_dir,
+        )
+
+    if "witness_collusion" in args.experiments:
+        witness_collusion_results = run_witness_collusion_experiment(
+            num_nodes=args.witness_collusion_nodes,
+            num_trials=args.witness_collusion_trials,
+            q_values=args.witness_q_values,
+            q_min_values=args.witness_q_min_values,
+            attacker_fraction=args.attacker_fraction,
             seed=args.seed,
             output_dir=run_layout.figures_dir,
         )
@@ -1492,6 +1721,7 @@ def main() -> None:
         correlated_failure_results,
         attacker_sweep_results,
         block_withholding_results,
+        witness_collusion_results,
         run_layout.data_dir,
     )
 

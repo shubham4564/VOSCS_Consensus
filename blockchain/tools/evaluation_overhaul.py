@@ -48,7 +48,7 @@ import sys
 import time
 from collections import Counter, defaultdict
 from contextlib import redirect_stdout as _redirect_stdout
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Optional, Tuple
 
 
@@ -140,6 +140,8 @@ class StrategyMetrics:
     attacker_share: float
     selection_error_rate: float
     gini_coefficient: float
+    selection_entropy: float
+    selection_concentration: float
     score_selection_spearman: float
     agreement_rate: float
     mean_solver_ms: float
@@ -152,6 +154,7 @@ class StrategyMetrics:
     committee_objective_mean: float = 0.0
     committee_raw_objective_mean: float = 0.0
     committee_candidate_count_mean: float = 0.0
+    proposer_share_trace: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -173,6 +176,21 @@ class SolverComparisonMetrics:
     exact_solver_ms_mean: float
     greedy_solver_ms_mean: float
     weighted_solver_ms_mean: float
+
+
+@dataclass
+class MeasurementOverheadMetrics:
+    strategy: str
+    num_nodes: int
+    num_rounds: int
+    window_rounds: int
+    num_windows: int
+    mean_active_nodes: float
+    probe_messages_per_window: float
+    probe_bytes_per_window: float
+    score_construction_cpu_ms: float
+    optimization_latency_ms: float
+    end_to_end_selection_ms: float
 
 
 @dataclass
@@ -226,6 +244,28 @@ def _compute_gini(selection_counts: Counter, num_nodes: int) -> float:
     # Gini = (2 * sum(i * x_i)) / (n * sum(x_i)) - (n+1)/n
     gini = (2.0 * weighted_sum) / (n * total) - (n + 1.0) / n
     return max(0.0, min(1.0, gini))
+
+
+def _compute_selection_entropy(selection_counts: Counter, num_nodes: int) -> float:
+    """Normalized Shannon entropy over proposer selection shares."""
+    counts = [selection_counts.get(f"node_{i}", 0) for i in range(num_nodes)]
+    total = sum(counts)
+    if num_nodes <= 1 or total == 0:
+        return 0.0
+
+    probabilities = [count / total for count in counts if count > 0]
+    entropy = -sum(probability * math.log(probability) for probability in probabilities)
+    normalized = entropy / math.log(num_nodes)
+    return max(0.0, min(1.0, normalized))
+
+
+def _compute_selection_concentration(selection_counts: Counter, num_nodes: int) -> float:
+    """Largest proposer share observed so far."""
+    counts = [selection_counts.get(f"node_{i}", 0) for i in range(num_nodes)]
+    total = sum(counts)
+    if total == 0:
+        return 0.0
+    return max(counts) / total
 
 
 def _spearman_correlation(xs: List[float], ys: List[float]) -> float:
@@ -523,6 +563,29 @@ def _evaluate_committee_round(
         'unique_failure_domain_ratio': len(unique_failure_domains) / len(committee_nodes),
         'attacker_seat_share': attacker_seat_share,
     }
+
+
+def _record_simulation_selection_feedback(
+    consensus: QuantumAnnealingConsensus,
+    *,
+    selected: Optional[str],
+    committee_nodes: Optional[List[str]] = None,
+) -> None:
+    """Feed simulated selections back into consensus state for dynamic baselines."""
+    for node_id in committee_nodes or []:
+        node_state = consensus.nodes.get(node_id)
+        if not node_state:
+            continue
+        node_state["committee_selection_count"] = node_state.get("committee_selection_count", 0) + 1
+
+    if selected and selected in consensus.nodes:
+        consensus.nodes[selected]["proposal_success_count"] = (
+            consensus.nodes[selected].get("proposal_success_count", 0) + 1
+        )
+        consensus.record_leader_selection(len(consensus.selection_history), selected)
+
+    consensus.node_performance_cache.clear()
+    consensus.committee_feature_cache.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -1596,6 +1659,7 @@ def run_simulation(
     strategy: str,
     ablation_cfg: Optional[AblationConfig] = None,
     verbose: bool = False,
+    trace_interval: int = 0,
 ) -> StrategyMetrics:
     """
     Run a full simulation for a single strategy.
@@ -1649,6 +1713,7 @@ def run_simulation(
     committee_objective_values: List[float] = []
     committee_raw_objective_values: List[float] = []
     committee_candidate_counts: List[float] = []
+    proposer_share_trace: List[Dict[str, Any]] = []
 
     if verbose:
         print(f"  Running {cfg.num_rounds} rounds with strategy={strategy}, N={cfg.num_nodes}")
@@ -1844,6 +1909,29 @@ def run_simulation(
             committee_raw_objective_values.append(committee_result.raw_objective_value)
             committee_candidate_counts.append(float(committee_result.candidate_count))
 
+        _record_simulation_selection_feedback(
+            consensus,
+            selected=selected,
+            committee_nodes=committee_nodes,
+        )
+
+        if trace_interval > 0 and ((rnd + 1) % trace_interval == 0 or rnd == cfg.num_rounds - 1):
+            completed_rounds = rnd + 1
+            total_selected_so_far = sum(selection_counts.values())
+            total_selected_safe = max(1, total_selected_so_far)
+            proposer_share_trace.append(
+                {
+                    "round": completed_rounds,
+                    "attacker_share": attacker_selected / total_selected_safe,
+                    "gini_coefficient": _compute_gini(selection_counts, cfg.num_nodes),
+                    "selection_entropy": _compute_selection_entropy(selection_counts, cfg.num_nodes),
+                    "selection_concentration": _compute_selection_concentration(selection_counts, cfg.num_nodes),
+                    "nakamoto_coefficient": _compute_nakamoto_coefficient(selection_counts),
+                    "missed_slot_rate": missed_slots / completed_rounds,
+                    "selected_rounds": total_selected_so_far,
+                }
+            )
+
         # Agreement rate (sampled every 50 rounds for performance)
         if strategy in ("quantum", "exact_argmax", "exact_ilp") and rnd % 50 == 0:
             agr = _compute_agreement_rate(consensus, active_nodes[:20], vrf_output)
@@ -1866,6 +1954,8 @@ def run_simulation(
 
     nakamoto = _compute_nakamoto_coefficient(selection_counts)
     gini = _compute_gini(selection_counts, cfg.num_nodes)
+    selection_entropy = _compute_selection_entropy(selection_counts, cfg.num_nodes)
+    selection_concentration = _compute_selection_concentration(selection_counts, cfg.num_nodes)
     mean_solver_ms = statistics.mean(solver_times_ms) if solver_times_ms else 0.0
 
     # Score-to-selection Spearman correlation
@@ -1908,6 +1998,8 @@ def run_simulation(
         attacker_share=attacker_share,
         selection_error_rate=sel_error_rate,
         gini_coefficient=gini,
+        selection_entropy=selection_entropy,
+        selection_concentration=selection_concentration,
         score_selection_spearman=spearman,
         agreement_rate=agreement_rate,
         mean_solver_ms=mean_solver_ms,
@@ -1920,6 +2012,7 @@ def run_simulation(
         committee_objective_mean=committee_objective_mean,
         committee_raw_objective_mean=committee_raw_objective_mean,
         committee_candidate_count_mean=committee_candidate_count_mean,
+        proposer_share_trace=proposer_share_trace,
     )
 
 
@@ -2000,6 +2093,257 @@ def resolve_strategy_preset(
             )
         return strategies
     raise ValueError(f"Unknown strategy preset: {preset!r}")
+
+
+_PROBE_BASED_STRATEGIES = {
+    "quantum",
+    "exact_argmax",
+    "exact_ilp",
+    "greedy_score",
+    "weighted_score",
+    "committee_quantum",
+    "committee_greedy",
+    "committee_weighted",
+    "committee_exact",
+    "committee_reputation",
+    "committee_composite_greedy",
+    "committee_fairness_only",
+}
+
+
+def _estimate_probe_exchange_bytes(witness_count: int) -> int:
+    probe_request = {
+        "source_id": "node_source",
+        "target_id": "node_target",
+        "timestamp": 1234567890.123,
+        "nonce": "a" * 64,
+        "request_signature": "b" * 128,
+    }
+    target_receipt = {
+        "original_request": "probe_request_hash",
+        "receipt_time": 1234567890.456,
+        "target_id": "node_target",
+        "target_signature": "c" * 128,
+    }
+    witness_receipt = {
+        "witness_id": "node_witness",
+        "observed_request": "probe_request_hash",
+        "witness_timestamp": 1234567890.789,
+        "target_receipt_observed": "target_receipt_hash",
+        "latency_observation": 12.34,
+        "witness_signature": "d" * 128,
+    }
+    return (
+        len(json.dumps(probe_request, sort_keys=True).encode("utf-8"))
+        + len(json.dumps(target_receipt, sort_keys=True).encode("utf-8"))
+        + witness_count * len(json.dumps(witness_receipt, sort_keys=True).encode("utf-8"))
+    )
+
+
+def _estimate_probe_overhead_for_round(
+    consensus: QuantumAnnealingConsensus,
+    strategy: str,
+    active_nodes: List[str],
+) -> Tuple[float, float]:
+    if strategy not in _PROBE_BASED_STRATEGIES or len(active_nodes) < 2:
+        return 0.0, 0.0
+
+    targets_per_source = min(consensus.probe_sample_size, max(1, len(active_nodes) - 1))
+    witness_count = min(consensus.witness_quorum_size, max(0, len(active_nodes) - 2))
+    probe_count = len(active_nodes) * targets_per_source
+    message_count = probe_count * (2 + witness_count)
+    byte_count = probe_count * _estimate_probe_exchange_bytes(witness_count)
+    return float(message_count), float(byte_count)
+
+
+def _measure_score_construction_cpu_ms(
+    consensus: QuantumAnnealingConsensus,
+    strategy: str,
+    active_nodes: List[str],
+) -> float:
+    if not active_nodes:
+        return 0.0
+
+    consensus.node_performance_cache.clear()
+    consensus.committee_feature_cache.clear()
+    t0 = time.perf_counter()
+    _strategy_correlation_signal(consensus, strategy, active_nodes)
+    elapsed_ms = (time.perf_counter() - t0) * 1000.0
+    consensus.node_performance_cache.clear()
+    consensus.committee_feature_cache.clear()
+    return elapsed_ms
+
+
+def _select_committee_strategy_for_overhead(
+    consensus: QuantumAnnealingConsensus,
+    strategy: str,
+    active_nodes: List[str],
+    vrf_output: str,
+    cfg: SimulationConfig,
+) -> CommitteeSelectionResult:
+    if strategy == "committee_quantum":
+        return _select_committee_quantum(consensus, active_nodes, vrf_output, cfg.committee_k, cfg.primary_leader_policy)
+    if strategy == "committee_greedy":
+        return _select_committee_greedy(consensus, active_nodes, vrf_output, cfg.committee_k, cfg.primary_leader_policy)
+    if strategy == "committee_weighted":
+        return _select_committee_weighted(consensus, active_nodes, vrf_output, cfg.committee_k, cfg.primary_leader_policy)
+    if strategy == "committee_uniform":
+        return _select_committee_uniform(consensus, active_nodes, vrf_output, cfg.committee_k, cfg.primary_leader_policy)
+    if strategy == "committee_vrf_stake":
+        return _select_committee_vrf_stake(consensus, active_nodes, vrf_output, cfg.committee_k, cfg.primary_leader_policy)
+    if strategy == "committee_reputation":
+        return _select_committee_reputation(consensus, active_nodes, vrf_output, cfg.committee_k, cfg.primary_leader_policy)
+    if strategy == "committee_composite_greedy":
+        return _select_committee_composite_greedy(consensus, active_nodes, vrf_output, cfg.committee_k, cfg.primary_leader_policy)
+    if strategy == "committee_fairness_only":
+        return _select_committee_fairness_only(consensus, active_nodes, vrf_output, cfg.committee_k, cfg.primary_leader_policy)
+    if strategy == "committee_exact":
+        return _select_committee_exact(
+            consensus,
+            active_nodes,
+            vrf_output,
+            cfg.committee_k,
+            cfg.primary_leader_policy,
+            cfg.exact_oracle_max_candidates,
+        )
+    raise ValueError(f"Unsupported overhead-study strategy: {strategy!r}")
+
+
+def run_measurement_overhead_study(
+    cfg: SimulationConfig,
+    *,
+    node_counts: Optional[List[int]] = None,
+    num_rounds: int = 100,
+    window_rounds: int = 25,
+    strategies: Optional[List[str]] = None,
+) -> List[MeasurementOverheadMetrics]:
+    """Measure per-window probe traffic and CPU overhead for committee-selection strategies."""
+    selected_strategies = list(strategies) if strategies is not None else [
+        "committee_quantum",
+        "committee_greedy",
+        "committee_vrf_stake",
+        "committee_reputation",
+        "committee_composite_greedy",
+        "committee_uniform",
+        "committee_fairness_only",
+    ]
+    selected_node_counts = list(node_counts) if node_counts is not None else [40, 100, 200]
+
+    results: List[MeasurementOverheadMetrics] = []
+    for num_nodes in selected_node_counts:
+        local_cfg = replace(cfg, num_nodes=num_nodes, num_rounds=num_rounds)
+        for strategy in selected_strategies:
+            if strategy == "committee_exact" and num_nodes > local_cfg.exact_oracle_max_candidates:
+                continue
+
+            consensus, node_ids, ground_truth, stake, hash_power, online_prob, is_attacker = _build_simulation_environment(local_cfg)
+            net_sim = NetworkSimulator(
+                model=local_cfg.network_delay_model,
+                mean_ms=local_cfg.network_delay_mean_ms,
+                sigma=local_cfg.network_delay_sigma,
+                seed=local_cfg.seed,
+            )
+
+            window_probe_messages = 0.0
+            window_probe_bytes = 0.0
+            window_score_cpu_ms = 0.0
+            window_optimization_ms = 0.0
+            window_end_to_end_ms = 0.0
+            current_window_rounds = 0
+
+            active_node_counts: List[float] = []
+            probe_windows: List[float] = []
+            byte_windows: List[float] = []
+            score_windows: List[float] = []
+            optimization_windows: List[float] = []
+            end_to_end_windows: List[float] = []
+
+            for rnd in range(num_rounds):
+                online_state = _update_round_metrics(
+                    consensus,
+                    node_ids,
+                    ground_truth,
+                    online_prob,
+                    net_sim,
+                    local_cfg,
+                )
+                _apply_churn(
+                    consensus,
+                    node_ids,
+                    ground_truth,
+                    online_prob,
+                    stake,
+                    hash_power,
+                    is_attacker,
+                    local_cfg,
+                    rng_seed=local_cfg.seed + rnd,
+                )
+
+                active_nodes = [node_id for node_id in node_ids if online_state.get(node_id, False)]
+                active_node_counts.append(float(len(active_nodes)))
+                if not active_nodes:
+                    continue
+
+                vrf_output = hashlib.sha256(f"overhead_round_{rnd}_{local_cfg.seed}".encode()).hexdigest()
+                probe_messages, probe_bytes = _estimate_probe_overhead_for_round(consensus, strategy, active_nodes)
+                score_cpu_ms = _measure_score_construction_cpu_ms(consensus, strategy, active_nodes)
+
+                t0 = time.perf_counter()
+                committee_result = _select_committee_strategy_for_overhead(consensus, strategy, active_nodes, vrf_output, local_cfg)
+                end_to_end_ms = (time.perf_counter() - t0) * 1000.0
+
+                window_probe_messages += probe_messages
+                window_probe_bytes += probe_bytes
+                window_score_cpu_ms += score_cpu_ms
+                window_optimization_ms += committee_result.solver_time_ms
+                window_end_to_end_ms += end_to_end_ms
+                current_window_rounds += 1
+
+                if committee_result.primary_leader:
+                    _record_simulation_selection_feedback(
+                        consensus,
+                        selected=committee_result.primary_leader,
+                        committee_nodes=committee_result.committee_nodes,
+                    )
+
+                if current_window_rounds == window_rounds or rnd == num_rounds - 1:
+                    completed_rounds = max(1, current_window_rounds)
+                    scale = window_rounds / completed_rounds
+                    probe_windows.append(window_probe_messages * scale)
+                    byte_windows.append(window_probe_bytes * scale)
+                    score_windows.append(window_score_cpu_ms * scale)
+                    optimization_windows.append(window_optimization_ms * scale)
+                    end_to_end_windows.append(window_end_to_end_ms * scale)
+
+                    window_probe_messages = 0.0
+                    window_probe_bytes = 0.0
+                    window_score_cpu_ms = 0.0
+                    window_optimization_ms = 0.0
+                    window_end_to_end_ms = 0.0
+                    current_window_rounds = 0
+
+            results.append(
+                MeasurementOverheadMetrics(
+                    strategy=strategy,
+                    num_nodes=num_nodes,
+                    num_rounds=num_rounds,
+                    window_rounds=window_rounds,
+                    num_windows=len(probe_windows),
+                    mean_active_nodes=statistics.mean(active_node_counts) if active_node_counts else 0.0,
+                    probe_messages_per_window=statistics.mean(probe_windows) if probe_windows else 0.0,
+                    probe_bytes_per_window=statistics.mean(byte_windows) if byte_windows else 0.0,
+                    score_construction_cpu_ms=statistics.mean(score_windows) if score_windows else 0.0,
+                    optimization_latency_ms=statistics.mean(optimization_windows) if optimization_windows else 0.0,
+                    end_to_end_selection_ms=statistics.mean(end_to_end_windows) if end_to_end_windows else 0.0,
+                )
+            )
+            print(
+                f"  overhead strategy={strategy:26s} nodes={num_nodes:4d} probe_msgs/window={results[-1].probe_messages_per_window:.1f} "
+                f"bytes/window={results[-1].probe_bytes_per_window:.1f} score_ms/window={results[-1].score_construction_cpu_ms:.2f} "
+                f"solver_ms/window={results[-1].optimization_latency_ms:.2f}"
+            )
+
+    return results
 
 
 def run_committee_baseline_comparison(
@@ -2405,6 +2749,84 @@ def _save_committee_ablation_plots(
     plt.close(fig)
 
 
+def save_measurement_overhead_results(
+    overhead_metrics: List[MeasurementOverheadMetrics],
+    output_dir: str,
+) -> str:
+    os.makedirs(output_dir, exist_ok=True)
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    path = os.path.join(output_dir, f"measurement_overhead_{timestamp}.json")
+    payload = {
+        "measurement_overhead": [
+            {
+                "strategy": metric.strategy,
+                "num_nodes": metric.num_nodes,
+                "num_rounds": metric.num_rounds,
+                "window_rounds": metric.window_rounds,
+                "num_windows": metric.num_windows,
+                "mean_active_nodes": metric.mean_active_nodes,
+                "probe_messages_per_window": metric.probe_messages_per_window,
+                "probe_bytes_per_window": metric.probe_bytes_per_window,
+                "score_construction_cpu_ms": metric.score_construction_cpu_ms,
+                "optimization_latency_ms": metric.optimization_latency_ms,
+                "end_to_end_selection_ms": metric.end_to_end_selection_ms,
+            }
+            for metric in overhead_metrics
+        ]
+    }
+    with open(path, "w") as handle:
+        json.dump(payload, handle, indent=2)
+    print(f"\n  Measurement overhead JSON saved to {path}")
+    return path
+
+
+def _save_measurement_overhead_plots(
+    overhead_metrics: List[MeasurementOverheadMetrics],
+    output_dir: str,
+) -> None:
+    if not overhead_metrics:
+        return
+
+    os.makedirs(output_dir, exist_ok=True)
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    strategies = sorted(set(metric.strategy for metric in overhead_metrics))
+    grouped = {
+        strategy: sorted(
+            [metric for metric in overhead_metrics if metric.strategy == strategy],
+            key=lambda item: item.num_nodes,
+        )
+        for strategy in strategies
+    }
+
+    fig, axes = plt.subplots(2, 2, figsize=(13, 9), sharex=True)
+    for strategy, items in grouped.items():
+        xs = [item.num_nodes for item in items]
+        axes[0][0].plot(xs, [item.probe_messages_per_window for item in items], marker="o", label=strategy)
+        axes[0][1].plot(xs, [item.probe_bytes_per_window for item in items], marker="o", label=strategy)
+        axes[1][0].plot(xs, [item.score_construction_cpu_ms for item in items], marker="o", label=strategy)
+        axes[1][1].plot(xs, [item.optimization_latency_ms for item in items], marker="o", label=strategy)
+
+    axes[0][0].set_title("Probe messages per window")
+    axes[0][1].set_title("Probe bytes per window")
+    axes[1][0].set_title("Score construction CPU per window")
+    axes[1][1].set_title("Optimization latency per window")
+    axes[0][0].set_ylabel("Messages")
+    axes[0][1].set_ylabel("Bytes")
+    axes[1][0].set_ylabel("Milliseconds")
+    axes[1][1].set_ylabel("Milliseconds")
+    axes[1][0].set_xlabel("Node count")
+    axes[1][1].set_xlabel("Node count")
+
+    for row in axes:
+        for ax in row:
+            ax.grid(True, linestyle="--", alpha=0.3)
+            ax.legend()
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, f"measurement_overhead_{timestamp}.png"))
+    plt.close(fig)
+
+
 # ---------------------------------------------------------------------------
 # JSON output
 # ---------------------------------------------------------------------------
@@ -2420,6 +2842,8 @@ def _metrics_to_dict(m: StrategyMetrics) -> dict:
         "attacker_share": m.attacker_share,
         "selection_error_rate": m.selection_error_rate,
         "gini_coefficient": m.gini_coefficient,
+        "selection_entropy": m.selection_entropy,
+        "selection_concentration": m.selection_concentration,
         "score_selection_spearman": m.score_selection_spearman,
         "agreement_rate": m.agreement_rate,
         "mean_solver_ms": m.mean_solver_ms,
@@ -2432,6 +2856,7 @@ def _metrics_to_dict(m: StrategyMetrics) -> dict:
         "committee_objective_mean": m.committee_objective_mean,
         "committee_raw_objective_mean": m.committee_raw_objective_mean,
         "committee_candidate_count_mean": m.committee_candidate_count_mean,
+        "proposer_share_trace": list(m.proposer_share_trace),
     }
 
 
@@ -2527,7 +2952,7 @@ def _save_solver_comparison_plot(
     candidate_counts = [m.candidate_count for m in solver_metrics]
 
     fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 10), sharex=True)
-    ax1.plot(candidate_counts, [m.quantum_optimality_gap_mean for m in solver_metrics], marker="o", label="Quantum gap")
+    ax1.plot(candidate_counts, [m.quantum_optimality_gap_mean for m in solver_metrics], marker="o", label="SA gap")
     ax1.plot(candidate_counts, [m.greedy_optimality_gap_mean for m in solver_metrics], marker="s", label="Greedy gap")
     ax1.plot(candidate_counts, [m.weighted_optimality_gap_mean for m in solver_metrics], marker="^", label="Weighted gap")
     ax1.set_ylabel("Mean optimality gap")
@@ -2535,14 +2960,14 @@ def _save_solver_comparison_plot(
     ax1.grid(True, linestyle="--", alpha=0.4)
     ax1.legend()
 
-    ax2.plot(candidate_counts, [m.quantum_disagreement_rate for m in solver_metrics], marker="o", label="Quantum")
+    ax2.plot(candidate_counts, [m.quantum_disagreement_rate for m in solver_metrics], marker="o", label="SA")
     ax2.plot(candidate_counts, [m.greedy_disagreement_rate for m in solver_metrics], marker="s", label="Greedy")
     ax2.plot(candidate_counts, [m.weighted_disagreement_rate for m in solver_metrics], marker="^", label="Weighted")
     ax2.set_ylabel("Disagreement rate")
     ax2.grid(True, linestyle="--", alpha=0.4)
     ax2.legend()
 
-    ax3.plot(candidate_counts, [m.quantum_solver_ms_mean for m in solver_metrics], marker="o", label="Quantum")
+    ax3.plot(candidate_counts, [m.quantum_solver_ms_mean for m in solver_metrics], marker="o", label="SA")
     ax3.plot(candidate_counts, [m.exact_solver_ms_mean for m in solver_metrics], marker="x", label="Exact oracle")
     ax3.plot(candidate_counts, [m.greedy_solver_ms_mean for m in solver_metrics], marker="s", label="Greedy")
     ax3.plot(candidate_counts, [m.weighted_solver_ms_mean for m in solver_metrics], marker="^", label="Weighted")

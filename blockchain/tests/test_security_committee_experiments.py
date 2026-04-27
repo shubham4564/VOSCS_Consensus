@@ -24,7 +24,9 @@ from tools.security_experiments import (
     run_attacker_fraction_sweep_experiment,
     run_block_withholding_experiment,
     run_correlated_failure_experiment,
+    run_witness_collusion_experiment,
 )
+from tools.evaluation_overhaul import SimulationConfig, run_simulation
 from blockchain.utils.result_layout import create_run_layout
 
 
@@ -48,6 +50,15 @@ def test_attacker_fraction_sweep_returns_expected_points():
         assert 0.0 <= result.attacker_proposer_share <= 1.0
         assert 0.0 <= result.attacker_committee_share <= 1.0
         assert 0.0 <= result.missed_slot_rate <= 1.0
+        assert result.estimated_throughput_blocks_per_sec > 0.0
+        assert result.throughput_degradation_ratio >= 0.0
+        assert result.finality_degradation_ratio >= 0.0
+
+    baseline_results = [result for result in results if result.attacker_fraction == 0.0]
+    assert baseline_results
+    for result in baseline_results:
+        assert result.throughput_degradation_ratio == 0.0
+        assert result.finality_degradation_ratio == 0.0
 
 
 def test_attacker_fraction_sweep_accepts_new_committee_baselines():
@@ -88,6 +99,46 @@ def test_attacker_fraction_sweep_can_include_exact_when_safe():
 
     strategies = {result.strategy for result in results}
     assert "committee_exact" in strategies
+
+
+def test_run_simulation_can_emit_proposer_share_trace():
+    cfg = SimulationConfig(
+        num_nodes=8,
+        num_rounds=5,
+        attacker_fraction=0.2,
+        committee_k=3,
+        seed=17,
+        output_dir="reports",
+    )
+
+    metrics = run_simulation(cfg, "committee_reputation", verbose=False, trace_interval=2)
+
+    assert metrics.proposer_share_trace
+    assert metrics.proposer_share_trace[-1]["round"] == 5
+    for point in metrics.proposer_share_trace:
+        assert 0.0 <= point["attacker_share"] <= 1.0
+        assert 0.0 <= point["gini_coefficient"] <= 1.0
+        assert 0.0 <= point["selection_entropy"] <= 1.0
+        assert 0.0 <= point["selection_concentration"] <= 1.0
+        assert point["round"] >= 1
+
+
+def test_witness_collusion_experiment_tracks_hypergeometric_bound():
+    results = run_witness_collusion_experiment(
+        num_nodes=8,
+        num_trials=128,
+        q_values=[3, 4],
+        q_min_values=[1, 2],
+        attacker_fraction=0.25,
+        output_dir=_figure_output_dir("test_witness_collusion"),
+    )
+
+    assert results
+    for result in results:
+        assert result.q_min <= result.q
+        assert 0.0 <= result.measured_capture_rate <= 1.0
+        assert 0.0 <= result.hypergeometric_capture_bound <= 1.0
+        assert result.absolute_gap >= 0.0
 
 
 def test_correlated_failure_experiment_reports_resilience_metrics():
