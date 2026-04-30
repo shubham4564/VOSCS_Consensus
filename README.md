@@ -401,23 +401,7 @@ tail -f logs/node1.log
 
 ---
 
-## Performance Benchmarks
-
-Measured on a 5-node cluster (single machine):
-
-| Metric | Value |
-|--------|-------|
-| Transaction submission rate | 272+ TPS |
-| PoH tick rate | 5 000 / sec |
-| Consensus (leader selection + block) | 2–15 s |
-| Leader selection startup | 2–3 s |
-| Sealevel parallel threads | 8 |
-| Leader API response | < 50 ms |
-
----
-
 ## License
 
 This project is licensed under the MIT License.
 
-> **Disclaimer**: This is a research and demonstration project. Not intended for production use.
