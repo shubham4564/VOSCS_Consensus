@@ -28,6 +28,8 @@ References:
 Output: JSON metrics and comparison graphs.
 """
 
+import hashlib
+import hmac
 import os
 import sys
 import time
@@ -59,6 +61,14 @@ _ensure_repo_root_on_path()
 del _ensure_repo_root_on_path
 
 import matplotlib.pyplot as plt
+
+plt.rcParams.update(
+    {
+        "font.family": ["Nimbus Roman", "serif"],
+        "font.serif": ["Nimbus Roman"],
+        "axes.unicode_minus": False,
+    }
+)
 
 from blockchain.quantum_consensus import QuantumAnnealingConsensus
 from blockchain.transaction.wallet import Wallet
@@ -190,6 +200,9 @@ class ThroughputEvaluator:
             
             public_key, _ = self.consensus.ensure_node_keys(node_id)
             self.consensus.register_node(node_id, public_key)
+            # Expose stake so both VRF-stake baseline and QUBO can use it
+            if node_id in self.consensus.nodes:
+                self.consensus.nodes[node_id]['stake_weight'] = self.stake[node_id]
         
         # Initialize wallets and blockchain for real transaction mode
         if self.cfg.use_real_transactions:
@@ -339,10 +352,23 @@ class ThroughputEvaluator:
     # =========================================================================
     
     def _select_quantum(self, active_nodes: List[str], block_hash: str) -> Optional[str]:
-        """Quantum annealing consensus selection."""
-        selected = self.consensus.select_representative_node(last_block_hash=block_hash)
-        if selected and selected in active_nodes:
-            return selected
+        """Quantum annealing committee selection (VOSCS / QUBO-based).
+
+        Uses select_committee to pick k members via the QUBO objective, then
+        returns the derived primary leader as the block producer.  Falls back
+        to a random active node if the committee call fails.
+        """
+        try:
+            result = self.consensus.select_committee(
+                vrf_output=block_hash,
+                candidate_nodes=active_nodes,
+                committee_k=min(5, len(active_nodes)),
+                primary_leader_policy='highest_score',
+            )
+            if result and result.primary_leader and result.primary_leader in active_nodes:
+                return result.primary_leader
+        except Exception:
+            pass
         return random.choice(active_nodes) if active_nodes else None
     
     def _select_greedy(self, active_nodes: List[str]) -> Optional[str]:
@@ -405,6 +431,91 @@ class ThroughputEvaluator:
         probs = [w / total for w in weights]
         
         return random.choices(active_nodes, weights=probs, k=1)[0]
+
+    # =========================================================================
+    # Table 2 committee-selection baselines
+    # =========================================================================
+
+    def _committee_primary(self, committee: List[str], scores: Dict[str, float]) -> Optional[str]:
+        """Return the highest-scoring member as primary leader."""
+        if not committee:
+            return None
+        return max(committee, key=lambda n: (scores.get(n, 0.0), n))
+
+    def _select_vrf_stake(self, active_nodes: List[str], block_hash: str) -> Optional[str]:
+        """Stake-weighted VRF sortition (Algorand/Ouroboros-style, Table 2 baseline)."""
+        if not active_nodes:
+            return None
+        scores: Dict[str, float] = {}
+        for node_id in active_nodes:
+            vrf_bytes = hmac.new(block_hash.encode(), node_id.encode(), hashlib.sha256).digest()
+            vrf_score = int.from_bytes(vrf_bytes[:4], "big") / 0xFFFF_FFFF
+            # Use the evaluator's own stake dict (consensus nodes don't carry stake_weight)
+            stake_w = self.stake.get(node_id, 1.0)
+            scores[node_id] = max(0.001, stake_w * vrf_score)
+        # weighted sample without replacement
+        rng = random.Random(block_hash)
+        k = min(5, len(active_nodes))
+        remaining = list(active_nodes)
+        committee: List[str] = []
+        while remaining and len(committee) < k:
+            weights = [max(0.001, scores.get(n, 0.0)) for n in remaining]
+            total = sum(weights)
+            draw = rng.random() * total
+            cumul = 0.0
+            chosen = remaining[-1]
+            for idx, w in enumerate(weights):
+                cumul += w
+                if draw <= cumul:
+                    chosen = remaining[idx]
+                    break
+            committee.append(chosen)
+            remaining.remove(chosen)
+        return self._committee_primary(committee, scores)
+
+    def _select_reputation_only(self, active_nodes: List[str]) -> Optional[str]:
+        """Reputation-only top-k (Table 2 baseline)."""
+        if not active_nodes:
+            return None
+        now = time.time()
+        scores: Dict[str, float] = {}
+        for node_id in active_nodes:
+            nd = self.consensus.nodes.get(node_id, {})
+            uptime = self.consensus.calculate_uptime(node_id)
+            past = nd.get("proposal_success_count", 0) - 2 * nd.get("proposal_failure_count", 0)
+            scores[node_id] = 0.65 * max(0.0, float(past)) + 0.35 * uptime
+        committee = sorted(active_nodes, key=lambda n: scores.get(n, 0.0), reverse=True)[:min(5, len(active_nodes))]
+        return self._committee_primary(committee, scores)
+
+    def _select_greedy_score_committee(self, active_nodes: List[str], block_hash: str) -> Optional[str]:
+        """Score-only greedy top-k without pairwise/fairness (Table 2 baseline)."""
+        if not active_nodes:
+            return None
+        try:
+            _, _, _, effective_scores, _ = self.consensus.formulate_committee_qubo_problem(
+                block_hash, active_nodes, committee_k=min(5, len(active_nodes))
+            )
+        except Exception:
+            effective_scores = {n: self.consensus.calculate_suitability_score(n) for n in active_nodes}
+        committee = sorted(active_nodes, key=lambda n: effective_scores.get(n, 0.0), reverse=True)[:min(5, len(active_nodes))]
+        return self._committee_primary(committee, effective_scores)
+
+    def _select_uniform_lottery(self, active_nodes: List[str], block_hash: str) -> Optional[str]:
+        """Uniform exact-k lottery (Table 2 baseline)."""
+        if not active_nodes:
+            return None
+        rng = random.Random(block_hash)
+        committee = rng.sample(sorted(active_nodes), min(5, len(active_nodes)))
+        # VRF tiebreak for leader
+        return min(committee, key=lambda n: hashlib.sha256(f"{block_hash}:{n}".encode()).hexdigest())
+
+    def _select_fairness_only(self, active_nodes: List[str]) -> Optional[str]:
+        """Fairness-only (anti-concentration) top-k (Table 2 baseline)."""
+        if not active_nodes:
+            return None
+        scores = {n: max(0.0, 1.0 - self.consensus.calculate_selection_frequency(n)) for n in active_nodes}
+        committee = sorted(active_nodes, key=lambda n: scores.get(n, 0.0), reverse=True)[:min(5, len(active_nodes))]
+        return self._committee_primary(committee, scores)
     
     def run_strategy(self, strategy_name: str) -> ThroughputResults:
         """Run evaluation for a single strategy."""
@@ -442,6 +553,14 @@ class ThroughputEvaluator:
                 producer = self._select_pos_stake(active_nodes)
             elif strategy_name == "pow_hash":
                 producer = self._select_pow_hash(active_nodes)
+            elif strategy_name == "vrf_stake":
+                producer = self._select_vrf_stake(active_nodes, block_hash)
+            elif strategy_name == "reputation_only":
+                producer = self._select_reputation_only(active_nodes)
+            elif strategy_name == "uniform_lottery":
+                producer = self._select_uniform_lottery(active_nodes, block_hash)
+            elif strategy_name == "fairness_only":
+                producer = self._select_fairness_only(active_nodes)
             else:
                 producer = random.choice(active_nodes)
             
@@ -459,10 +578,22 @@ class ThroughputEvaluator:
             if not success:
                 results.missed_blocks += 1
                 block_times.append(prod_time + self.cfg.base_block_time)  # Retry cost
+                # Update failure count so reputation/suitability scores evolve correctly
+                node_data = self.consensus.nodes.get(producer)
+                if node_data is not None:
+                    node_data['proposal_failure_count'] += 1
+                self.consensus.node_performance_cache.clear()
                 continue
             
             # Successful block
             results.blocks_produced += 1
+            
+            # Record selection so selection_frequency and fairness signals evolve correctly
+            self.consensus.record_leader_selection(block_idx, producer)
+            node_data = self.consensus.nodes.get(producer)
+            if node_data is not None:
+                node_data['proposal_success_count'] += 1
+            self.consensus.node_performance_cache.clear()
             
             if self.is_attacker.get(producer, False):
                 results.attacker_blocks += 1
@@ -517,11 +648,10 @@ class ThroughputEvaluator:
         """
         strategies = [
             "quantum",
-            "greedy_score", 
-            "weighted_score",
-            "round_robin",
-            "pos_stake",
-            "pow_hash",
+            "vrf_stake",
+            "reputation_only",
+            "uniform_lottery",
+            "fairness_only",
         ]
         
         if parallel:
@@ -649,7 +779,21 @@ def plot_results(
     """Generate comparison plots."""
     os.makedirs(os.path.dirname(output_prefix), exist_ok=True)
     
+    LABELS = {
+        "quantum": "VOSCS (Ours)",
+        "vrf_stake": "Stake-weighted VRF",
+        "reputation_only": "Reputation-only",
+        "uniform_lottery": "Uniform lottery",
+        "fairness_only": "Fairness-only",
+        # legacy single-node strategies kept for backward compat
+        "greedy_score": "greedy_score",
+        "weighted_score": "weighted_score",
+        "round_robin": "round_robin",
+        "pos_stake": "pos_stake",
+        "pow_hash": "pow_hash",
+    }
     strategies = list(results.keys())
+    labels = [LABELS.get(s, s) for s in strategies]
     x = list(range(len(strategies)))
     width = 0.6
     
@@ -668,7 +812,7 @@ def plot_results(
                     ha='center', va='bottom', fontsize=9)
     
     ax.set_xticks(x)
-    ax.set_xticklabels(strategies, rotation=20, ha='right')
+    ax.set_xticklabels(labels, rotation=20, ha="right")
     ax.set_ylabel('Transactions per Second (TPS)')
     ax.set_title('Transaction Throughput by Consensus Strategy')
     ax.legend()
@@ -697,10 +841,10 @@ def plot_results(
                         ha='center', va='bottom', fontsize=8)
     
     ax.set_xticks(x)
-    ax.set_xticklabels(strategies, rotation=20, ha='right')
+    ax.set_xticklabels(labels, rotation=20, ha="right")
     ax.set_ylabel('Block Production Time (ms)')
     ax.set_title('Block Production Time by Consensus Strategy')
-    ax.legend()
+    ax.legend(loc="upper left")
     plt.tight_layout()
     plt.savefig(f"{output_prefix}_block_time.png", dpi=150)
     plt.close(fig)
@@ -725,10 +869,10 @@ def plot_results(
                         ha='center', va='bottom', fontsize=8)
     
     ax.set_xticks(x)
-    ax.set_xticklabels(strategies, rotation=20, ha='right')
+    ax.set_xticklabels(labels, rotation=20, ha="right")
     ax.set_ylabel('Finality Time (ms)')
     ax.set_title('Transaction Finality Time by Consensus Strategy')
-    ax.legend()
+    ax.legend(loc="upper left")
     plt.tight_layout()
     plt.savefig(f"{output_prefix}_finality.png", dpi=150)
     plt.close(fig)
@@ -751,7 +895,7 @@ def plot_results(
     bars3 = ax.bar([i + bar_width for i in x], norm_ft, bar_width, label='Finality Speed', color='darkorange')
     
     ax.set_xticks(x)
-    ax.set_xticklabels(strategies, rotation=20, ha='right')
+    ax.set_xticklabels(labels, rotation=20, ha="right")
     ax.set_ylabel('Normalized Score (higher is better)')
     ax.set_ylim(0, 1.15)
     ax.set_title('Normalized Performance Comparison')
@@ -759,6 +903,106 @@ def plot_results(
     plt.tight_layout()
     plt.savefig(f"{output_prefix}_comparison.png", dpi=150)
     plt.close(fig)
+
+
+def _save_fig(fig: plt.Figure, base_path: str) -> None:
+    """Save a figure as both PNG and SVG."""
+    os.makedirs(os.path.dirname(base_path), exist_ok=True)
+    for ext in (".png", ".svg"):
+        fig.savefig(base_path + ext, dpi=200, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+
+
+def plot_paper_figures(
+    results: Dict[str, ThroughputResults],
+    output_dir: str,
+) -> None:
+    """Generate two separate publication-style figures.
+
+    Figure 2a: Transaction throughput (TPS) — single blue bar chart.
+    Figure 2b: Block production and finality times — 4-metric grouped bars.
+    Saves each as both PNG and SVG.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    LABELS = {
+        "quantum": "VOSCS\n(Ours)",
+        "vrf_stake": "Stake-\nweighted VRF",
+        "reputation_only": "Reputation-\nonly",
+        "greedy_score_committee": "Score-only\nGreedy",
+        "uniform_lottery": "Uniform\nLottery",
+        "fairness_only": "Fairness-\nonly",
+        # legacy
+        "greedy_score": "Greedy\nScore",
+        "weighted_score": "Weighted\nScore",
+        "round_robin": "Round\nRobin",
+        "pos_stake": "PoS",
+        "pow_hash": "PoW",
+    }
+
+    strategies = list(results.keys())
+    labels = [LABELS.get(s, s) for s in strategies]
+    x = list(range(len(strategies)))
+
+    COLOR_TPS = "#4472C4"
+    COLOR_MEAN_BT = "#4472C4"
+    COLOR_P95_BT = "#ED7D31"
+    COLOR_MEAN_FT = "#A5A5A5"
+    COLOR_P95_FT = "#FFC000"
+
+    FS_TICK  = 13   # x/y tick labels
+    FS_LABEL = 14   # axis labels
+    FS_ANNOT = 12   # bar value annotations
+    FS_LEGEND = 13  # legend
+
+    # ── Figure 2a: Transaction Throughput ────────────────────────────────────
+    fig_a, ax_a = plt.subplots(figsize=(7, 5))
+
+    tps_values = [results[s].mean_tps for s in strategies]
+    bars = ax_a.bar(x, tps_values, color=COLOR_TPS, edgecolor="white", linewidth=0.5)
+    for bar in bars:
+        h = bar.get_height()
+        ax_a.annotate(
+            f"{h:.0f}",
+            xy=(bar.get_x() + bar.get_width() / 2, h),
+            xytext=(0, 3), textcoords="offset points",
+            ha="center", va="bottom", fontsize=FS_ANNOT,
+        )
+    ax_a.set_xticks(x)
+    ax_a.set_xticklabels(labels, ha="center", fontsize=FS_TICK)
+    ax_a.set_ylabel("Transactions per second (TPS)", fontsize=FS_LABEL)
+    ax_a.tick_params(axis="y", labelsize=FS_TICK)
+    ax_a.set_ylim(0, max(tps_values) * 1.18)
+    ax_a.spines["top"].set_visible(False)
+    ax_a.spines["right"].set_visible(False)
+
+    _save_fig(fig_a, os.path.join(output_dir, "throughput"))
+
+    # ── Figure 2b: Block + Finality Times ────────────────────────────────────
+    fig_b, ax_b = plt.subplots(figsize=(7, 5))
+
+    bw = 0.18
+    offsets = [-1.5 * bw, -0.5 * bw, 0.5 * bw, 1.5 * bw]
+
+    mean_bt = [results[s].mean_block_time * 1000 for s in strategies]
+    p95_bt  = [results[s].p95_block_time  * 1000 for s in strategies]
+    mean_ft = [results[s].mean_finality_time * 1000 for s in strategies]
+    p95_ft  = [results[s].p95_finality_time  * 1000 for s in strategies]
+
+    ax_b.bar([xi + offsets[0] for xi in x], mean_bt, bw, label="Mean Block Time (ms)",    color=COLOR_MEAN_BT, edgecolor="white", linewidth=0.4)
+    ax_b.bar([xi + offsets[1] for xi in x], p95_bt,  bw, label="P95 Block Time (ms)",     color=COLOR_P95_BT,  edgecolor="white", linewidth=0.4)
+    ax_b.bar([xi + offsets[2] for xi in x], mean_ft, bw, label="Mean Finality Time (ms)", color=COLOR_MEAN_FT, edgecolor="white", linewidth=0.4)
+    ax_b.bar([xi + offsets[3] for xi in x], p95_ft,  bw, label="P95 Finality Time (ms)",  color=COLOR_P95_FT,  edgecolor="white", linewidth=0.4)
+
+    ax_b.set_xticks(x)
+    ax_b.set_xticklabels(labels, ha="center", fontsize=FS_TICK)
+    ax_b.set_ylabel("Time (ms)", fontsize=FS_LABEL)
+    ax_b.tick_params(axis="y", labelsize=FS_TICK)
+    ax_b.spines["top"].set_visible(False)
+    ax_b.spines["right"].set_visible(False)
+    ax_b.legend(loc="upper left", ncol=1, fontsize=FS_LEGEND, frameon=False)
+
+    _save_fig(fig_b, os.path.join(output_dir, "block_finality"))
 
 
 def main() -> None:
@@ -841,9 +1085,13 @@ def main() -> None:
     metrics_path = os.path.join(run_layout.data_dir, "throughput_metrics.json")
     save_results_json(results, cfg, metrics_path)
     plot_results(results, prefix)
-    
+
+    paper_figs_dir = run_layout.figures_dir
+    plot_paper_figures(results, paper_figs_dir)
+
     print(f"\n💾 Metrics saved to: {metrics_path}")
     print(f"📈 Plots saved with prefix: {prefix}_*.png")
+    print(f"📄 Paper figures saved to: {paper_figs_dir}/throughput.{{png,svg}} and block_finality.{{png,svg}}")
 
 
 if __name__ == "__main__":

@@ -623,7 +623,7 @@ def plot_literature_diversity_scatter(record: ManifestRecord, output_dir: Path) 
     )
     ax.text(
         0.14, 0.963, "preferred region",
-        fontsize=10, color="#2a7a2a", style="italic", alpha=0.9, zorder=1,
+        fontsize=8, color="#2a7a2a", style="italic", alpha=0.9, zorder=1,
     )
     ax.annotate(
         "better",
@@ -651,15 +651,15 @@ def plot_literature_diversity_scatter(record: ManifestRecord, output_dir: Path) 
             ax.scatter(
                 x_value, y_value, s=size * 1.18,
                 facecolor=strategy_color(name), edgecolor="black",
-                linewidth=1.3, marker=strategy_marker(name),
+                linewidth=1.3, marker="o",
                 alpha=0.96, zorder=4,
             )
         else:
             ax.scatter(
                 x_value, y_value, s=size,
-                facecolor="white", edgecolor=strategy_color(name),
-                linewidth=1.05, marker=strategy_marker(name),
-                alpha=0.95, zorder=3,
+                facecolor=strategy_color(name), edgecolor=strategy_color(name),
+                linewidth=1.05, marker="o",
+                alpha=0.85, zorder=3,
             )
 
     # Label placement with rough collision avoidance.  Keeps inline labels
@@ -681,6 +681,10 @@ def plot_literature_diversity_scatter(record: ManifestRecord, output_dir: Path) 
         else:
             dy, va = 0.009, "bottom"
 
+        # Per-strategy overrides for legibility
+        if canonical_strategy_key(name) == "committee_uniform":
+            dy, va = -0.011, "top"
+
         for ox, oy in occupied:
             if abs(ox - (x_value + dx)) < 0.06 and abs(oy - (y_value + dy)) < 0.014:
                 dy = -dy if dy > 0 else -dy + 0.020
@@ -698,8 +702,8 @@ def plot_literature_diversity_scatter(record: ManifestRecord, output_dir: Path) 
 
     # Inline note explaining the size encoding.  Cheaper than a second legend.
     ax.text(
-        0.985, 0.025, r"Marker size $\propto$ PQI",
-        transform=ax.transAxes, fontsize=10, ha="right", va="bottom",
+        0.985, 0.025, r"Marker size $\propto$ mean PQI",
+        transform=ax.transAxes, fontsize=8, ha="right", va="bottom",
         color="#555555", style="italic",
     )
 
