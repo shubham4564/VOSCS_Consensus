@@ -15,7 +15,7 @@ A research artifact for **verifiable optimization-based blockchain consensus** w
 - **Proof of History** — 5 000 ticks/sec cryptographic clock for verifiable ordering.
 - **Sealevel** — Parallel transaction execution with 8-thread processing.
 - **Turbine** — Erasure-coded block propagation with shred distribution.
-- **Full Evaluation Suite** — Baseline comparisons, ablation studies, security experiments, and timing benchmarks (see [Reproducing the Evaluation](#reproducing-the-evaluation)).
+- **Full Evaluation Suite** — Baseline comparisons, ablation studies, security experiments, curated paper figures, and throughput/finality benchmarks (see [Reproducing the Evaluation](#reproducing-the-evaluation)).
 
 ---
 
@@ -124,6 +124,47 @@ ls "$latest_run/exports"
 
 If the run completed correctly, the `test -f` checks succeed silently, the directory listing shows the expected stage folders, and `exports/` contains reviewer-facing tables and summaries.
 
+### Generating The Curated Figure Bundle
+
+The attached `reports/figure/` tree is produced by `tools/generate_evaluation_figures.py`. This is the fastest way to regenerate the paper-style figures from the archived evaluation outputs already included in the artifact under `reports/ccs_eval_old/`, `reports/ccs_eval/`, and `reports/old/`.
+
+```bash
+cd blockchain
+python tools/generate_evaluation_figures.py --output-dir reports/figure
+```
+
+This command writes a curated figure bundle of the form:
+
+```text
+reports/figure/
+  figure_manifest.json
+  ablation/
+  baselines/
+  long_horizon/
+  scaling/
+  security/
+  solver/
+```
+
+`figure_manifest.json` records the generated figure paths and the raw JSON sources used for each plot, so it is the main provenance file for the attached `reports/figure/` outputs.
+
+To verify that the figure bundle was generated correctly:
+
+```bash
+cd blockchain
+test -f reports/figure/figure_manifest.json
+find reports/figure -maxdepth 2 -type f | sort
+```
+
+If you have fresh raw evaluation outputs in a non-default directory, add that directory to the scan roots:
+
+```bash
+cd blockchain
+python tools/generate_evaluation_figures.py \
+  --report-roots reports/reviewer_eval reports/ccs_eval_old reports/ccs_eval reports/old \
+  --output-dir reports/figure
+```
+
 ### Reproducing Individual Evaluation Components
 
 Main strategy comparison and ablation harness:
@@ -157,6 +198,56 @@ Throughput and finality evaluation:
 cd blockchain
 python tools/throughput_evaluation.py
 ```
+
+To reproduce the attached throughput run with the same main parameters (`100` nodes, `100` blocks, `500` transactions per block, attacker fraction `0.2`, seed `42`), run:
+
+```bash
+cd blockchain
+python tools/throughput_evaluation.py \
+  --nodes 100 \
+  --blocks 100 \
+  --txs-per-block 500 \
+  --attackers 0.2 \
+  --seed 42 \
+  --output-dir reports
+```
+
+This creates a timestamped run directory of the form:
+
+```text
+reports/
+  <YYYYMMDD_HHMMSS>_throughput_evaluation/
+    data/
+      throughput_metrics.json
+    figures/
+      block_finality.png
+      throughput.png
+      throughput_block_time.png
+      throughput_comparison.png
+      throughput_finality.png
+      throughput_throughput.png
+    exports/
+    metadata/
+      run_manifest.json
+```
+
+The primary reviewer-facing files are:
+
+- `data/throughput_metrics.json` for per-strategy TPS, block-time, finality, and attacker-share metrics
+- `figures/` for the generated throughput and latency plots
+- `metadata/run_manifest.json` for the exact run configuration and output layout
+
+To verify the latest throughput run:
+
+```bash
+cd blockchain
+latest_run="$(ls -dt reports/*throughput_evaluation | head -n 1)"
+test -f "$latest_run/data/throughput_metrics.json"
+test -f "$latest_run/metadata/run_manifest.json"
+find "$latest_run/figures" -maxdepth 1 -type f | sort
+```
+
+Add `--real --wallets 20 --sequential` if you want to run the same benchmark with real signed transactions instead of the default simulated transaction workload.
 
 ### Verifying With Reviewer-Facing Tests
 
