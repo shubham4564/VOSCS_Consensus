@@ -99,6 +99,8 @@ reports/reviewer_eval/
     reduced/
     literature/
     solver/
+    committee_ablation/
+    measurement_overhead/
     security/
     exports/
     metadata/
@@ -156,7 +158,7 @@ test -f reports/figure/figure_manifest.json
 find reports/figure -maxdepth 2 -type f | sort
 ```
 
-If you have fresh raw evaluation outputs in a non-default directory, add that directory to the scan roots:
+If you have fresh raw evaluation outputs in a non-default directory, add that directory to the scan roots. **This is necessary when pointing the figure generator at a fresh reviewer run**, since the default scan roots do not include `reports/reviewer_eval`:
 
 ```bash
 cd blockchain
@@ -167,7 +169,9 @@ python tools/generate_evaluation_figures.py \
 
 ### Reproducing Individual Evaluation Components
 
-Main strategy comparison and ablation harness:
+Run the components in this order so that `generate_evaluation_figures.py` can collect all outputs in a single pass.
+
+**1. Main strategy comparison and ablation harness:**
 
 ```bash
 cd blockchain
@@ -176,28 +180,92 @@ python tools/evaluation_overhaul.py \
   --strategy-preset literature
 ```
 
-Committee security experiments:
+**2. Committee security experiments:**
 
 ```bash
 cd blockchain
 python tools/security_experiments.py \
   --output-dir reports/eval_security \
-  --experiments probe_manipulation infra_gaming score_racing attacker_sweep correlated_failure block_withholding
+  --experiments probe_manipulation infra_gaming score_racing \
+                attacker_sweep correlated_failure block_withholding
 ```
 
-Selection timing benchmark:
+> `witness_collusion` is already run as part of `committee_comparative_evaluation.py` (Step 4 above). Add it here only if you want a standalone run.
+
+**3. Selection timing benchmark:**
 
 ```bash
 cd blockchain
 python tools/suitability_timing_benchmark.py
 ```
 
-Throughput and finality evaluation:
+**4. Throughput and finality evaluation:**
 
 ```bash
 cd blockchain
 python tools/throughput_evaluation.py
 ```
+
+**5. Generate curated paper figures (run last, after all components above):**
+
+```bash
+cd blockchain
+python tools/generate_evaluation_figures.py \
+  --report-roots reports/reviewer_eval reports/eval_main reports/eval_security \
+  --output-dir reports/figure
+```
+
+### Reproducing the Measurement Overhead Table
+
+The measurement overhead table (probe traffic, VOSCS optimization time, greedy optimization time, and lightweight optimization time across node counts) is produced by calling `run_measurement_overhead_study` directly, since the CLI of `committee_comparative_evaluation.py` does not expose `--measurement-overhead-nodes`. Run the following inline script from `blockchain/`:
+
+```bash
+cd blockchain
+python - <<'EOF'
+import sys, os
+sys.path.insert(0, os.path.abspath("."))
+
+from tools.evaluation_overhaul import (
+    SimulationConfig,
+    run_measurement_overhead_study,
+    save_measurement_overhead_results,
+)
+from blockchain.utils.result_layout import create_run_layout
+
+cfg = SimulationConfig(
+    num_nodes=200,
+    num_rounds=100,
+    seed=42,
+    attacker_fraction=0.2,
+    committee_k=7,
+    metadata_profile="clustered_attackers",
+    output_dir="reports/overhead_N50_100_150_200",
+)
+
+run_layout = create_run_layout(cfg.output_dir, "measurement_overhead")
+
+overhead_metrics = run_measurement_overhead_study(
+    cfg,
+    node_counts=[50, 100, 150, 200],
+    num_rounds=100,
+    window_rounds=25,
+)
+
+out_json = save_measurement_overhead_results(overhead_metrics, run_layout.data_dir)
+print(f"Results written to: {out_json}")
+EOF
+```
+
+Parameters match the table caption: 100 rounds, 25-round measurement window. Replace `node_counts` with `[40, 100, 200]` to reproduce the originally published N=40/100/200 rows. Output lands in:
+
+```text
+reports/overhead_N50_100_150_200/
+  <YYYYMMDD_HHMMSS>_measurement_overhead/
+    data/
+      measurement_overhead_<timestamp>.json
+```
+
+The JSON key `measurement_overhead` contains one record per node count with fields for probe traffic (MB), VOSCS solver time (ms), greedy time (ms), and lightweight time (ms).
 
 To reproduce the attached throughput run with the same main parameters (`100` nodes, `100` blocks, `500` transactions per block, attacker fraction `0.2`, seed `42`), run:
 
