@@ -534,7 +534,7 @@ def plot_solver_figures(aggregated: dict[int, dict[str, tuple[float, float]]], o
 
     fig, ax = plt.subplots(figsize=(ACM_DOUBLE_COLUMN_WIDTH, ACM_PANEL_HEIGHT))
     for metric_name, label, color in (
-        ("quantum_gap", "Simulated annealing", COLOR_MAP["committee_quantum"]),
+        ("quantum_gap", "Simulated annealing", "#111111"),
         ("greedy_gap", "Greedy", COLOR_MAP["committee_greedy"]),
         ("weighted_gap", "Weighted sampling", COLOR_MAP["committee_weighted"]),
     ):
@@ -565,8 +565,8 @@ def plot_solver_figures(aggregated: dict[int, dict[str, tuple[float, float]]], o
     for metric_name, label, color in (
         ("greedy_ms", "Greedy", COLOR_MAP["committee_greedy"]),
         ("weighted_ms", "Weighted sampling", COLOR_MAP["committee_weighted"]),
-        ("exact_ms", "Exact enumeration", COLOR_MAP["committee_exact"]),
-        ("quantum_ms", "Simulated annealing", COLOR_MAP["committee_quantum"]),
+        ("exact_ms", "Exact enumeration", "#009E73"),
+        ("quantum_ms", "Simulated annealing", "#111111"),
     ):
         means = [aggregated[count][metric_name][0] for count in candidate_counts]
         stds = [aggregated[count][metric_name][1] for count in candidate_counts]
@@ -936,8 +936,11 @@ def plot_attacker_sweep(record: ManifestRecord, output_dir: Path) -> Optional[Ge
     for strategy_name in sorted(grouped, key=strategy_sort_key):
         items = sorted(grouped[strategy_name], key=lambda item: float(item["attacker_fraction"]))
         xs = [float(item["attacker_fraction"]) for item in items]
-        axes[0].plot(xs, [float(item["attacker_proposer_share"]) for item in items], marker=strategy_marker(strategy_name), linestyle=strategy_linestyle(strategy_name), markerfacecolor="white", markeredgewidth=0.8, label=strategy_label(strategy_name), color=strategy_color(strategy_name))
-        axes[1].plot(xs, [float(item["throughput_degradation_ratio"]) for item in items], marker=strategy_marker(strategy_name), linestyle=strategy_linestyle(strategy_name), markerfacecolor="white", markeredgewidth=0.8, label=strategy_label(strategy_name), color=strategy_color(strategy_name))
+        _is_proposed = canonical_strategy_key(strategy_name) == "committee_quantum"
+        _lw = 2.2 if _is_proposed else 1.25
+        _zorder = 4 if _is_proposed else 2
+        axes[0].plot(xs, [float(item["attacker_proposer_share"]) for item in items], marker=strategy_marker(strategy_name), linestyle=strategy_linestyle(strategy_name), markerfacecolor="white", markeredgewidth=0.8, linewidth=_lw, zorder=_zorder, label=strategy_label(strategy_name), color=strategy_color(strategy_name))
+        axes[1].plot(xs, [float(item["throughput_degradation_ratio"]) for item in items], marker=strategy_marker(strategy_name), linestyle=strategy_linestyle(strategy_name), markerfacecolor="white", markeredgewidth=0.8, linewidth=_lw, zorder=_zorder, label=strategy_label(strategy_name), color=strategy_color(strategy_name))
     axes[0].plot([0.0, 0.5], [0.0, 0.5], linestyle=":", color="#444444", linewidth=1.0, label="Ideal y=x")
     axes[0].set_title("Attacker capture under attacker-fraction sweep")
     axes[0].set_ylabel("Attacker proposer share")
